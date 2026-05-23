@@ -1,4 +1,3 @@
-import asyncio
 import io
 import os
 import random
@@ -8,24 +7,38 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, Update
 from dotenv import load_dotenv
+from fastapi import FastAPI, Request
 
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN не найден в переменных окружения")
+    raise RuntimeError("BOT_TOKEN не найден")
 
+if not WEBHOOK_URL:
+    raise RuntimeError("WEBHOOK_URL не найден")
 
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_FULL_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+
+app = FastAPI()
 router = Router()
+dp = Dispatcher()
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 
 
 def split_sentences(text: str) -> list[str]:
     sentences = re.split(r"(?<=[.!?])\s+", text)
-    return [sentence.strip() for sentence in sentences if len(sentence.strip()) > 30]
+    return [s.strip() for s in sentences if len(s.strip()) > 30]
 
 
 def make_questions(text: str) -> list[str]:
@@ -102,17 +115,28 @@ async def other_handler(message: Message) -> None:
     await message.answer("Пришлите .txt файл, и я составлю 10 вопросов по тексту.")
 
 
-async def main() -> None:
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+dp.include_router(router)
 
-    dp = Dispatcher()
-    dp.include_router(router)
 
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+@app.on_event("startup")
+async def on_startup() -> None:
+    await bot.set_webhook(WEBHOOK_FULL_URL)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    await bot.delete_webhook()
+    await bot.session.close()
+
+
+@app.get("/")
+async def root() -> dict:
+    return {"status": "ok", "bot": "running"}
+
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request) -> dict:
+    data = await request.json()
+    update = Update.model_validate(data, context={"bot": bot})
+    await dp.feed_update(bot, update)
+    return {"ok": True}
