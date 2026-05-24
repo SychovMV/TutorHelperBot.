@@ -1,44 +1,40 @@
+import asyncio
 import io
+import logging
 import os
 import random
 import re
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import Message, Update
+from aiogram.types import Message
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
 
 
 load_dotenv()
 
+# ---------------- DEBUG ----------------
+print("BOT_TOKEN exists:", bool(os.getenv("BOT_TOKEN")))
+print("PORT:", os.getenv("PORT"))
+
+# ---------------- LOGGING ----------------
+logging.basicConfig(level=logging.INFO)
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN не найден")
+    raise RuntimeError("BOT_TOKEN не найден в переменных окружения")
 
-if not WEBHOOK_URL:
-    raise RuntimeError("WEBHOOK_URL не найден")
 
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_FULL_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-
-app = FastAPI()
 router = Router()
-dp = Dispatcher()
-
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
 
 
 def split_sentences(text: str) -> list[str]:
     sentences = re.split(r"(?<=[.!?])\s+", text)
-    return [s.strip() for s in sentences if len(s.strip()) > 30]
+    return [sentence.strip() for sentence in sentences if len(sentence.strip()) > 30]
 
 
 def make_questions(text: str) -> list[str]:
@@ -97,46 +93,81 @@ async def document_handler(message: Message, bot: Bot) -> None:
         try:
             text = raw_data.decode("cp1251")
         except UnicodeDecodeError:
-            await message.answer("Не удалось прочитать файл. Сохраните его в UTF-8.")
+            await message.answer(
+                "Не удалось прочитать файл. Сохраните его в UTF-8."
+            )
             return
 
     text = text.strip()
 
     if len(text) < 200:
-        await message.answer("Текст слишком короткий. Пришлите файл минимум на 200 символов.")
+        await message.answer(
+            "Текст слишком короткий. Пришлите файл минимум на 200 символов."
+        )
         return
 
     questions = make_questions(text)
+
     await message.answer("\n\n".join(questions))
 
 
 @router.message()
 async def other_handler(message: Message) -> None:
-    await message.answer("Пришлите .txt файл, и я составлю 10 вопросов по тексту.")
+    await message.answer(
+        "Пришлите .txt файл, и я составлю 10 вопросов по тексту."
+    )
 
 
-dp.include_router(router)
+# ---------------- HTTP SERVER ----------------
+async def start_http_server() -> None:
+    async def health_check(request: web.Request) -> web.Response:
+        return web.Response(text="OK")
+
+    app = web.Application()
+    app.router.add_get("/", health_check)
+
+    port = int(os.getenv("PORT", "10000"))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(runner, "0.0.0.0", port)
+
+    await site.start()
+
+    logging.info(f"HTTP server started on port {port}")
+
+    while True:
+        await asyncio.sleep(3600)
 
 
-@app.on_event("startup")
-async def on_startup() -> None:
-    await bot.set_webhook(WEBHOOK_FULL_URL)
+# ---------------- TELEGRAM BOT ----------------
+async def start_bot() -> None:
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML
+        ),
+    )
+
+    dp = Dispatcher()
+
+    dp.include_router(router)
+
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    logging.info("Telegram polling started")
+
+    await dp.start_polling(bot)
 
 
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    await bot.delete_webhook()
-    await bot.session.close()
+# ---------------- MAIN ----------------
+async def main() -> None:
+    await asyncio.gather(
+        start_http_server(),
+        start_bot(),
+    )
 
 
-@app.get("/")
-async def root() -> dict:
-    return {"status": "ok", "bot": "running"}
-
-
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request) -> dict:
-    data = await request.json()
-    update = Update.model_validate(data, context={"bot": bot})
-    await dp.feed_update(bot, update)
-    return {"ok": True}
+if __name__ == "__main__":
+    asyncio.run(main())
