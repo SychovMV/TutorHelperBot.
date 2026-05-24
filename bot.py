@@ -2,8 +2,6 @@ import asyncio
 import io
 import logging
 import os
-import random
-import re
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
@@ -12,62 +10,81 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 
 
 load_dotenv()
 
-# ---------------- DEBUG ----------------
 print("BOT_TOKEN exists:", bool(os.getenv("BOT_TOKEN")))
+print("OPENAI_API_KEY exists:", bool(os.getenv("OPENAI_API_KEY")))
 print("PORT:", os.getenv("PORT"))
 
-# ---------------- LOGGING ----------------
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден в переменных окружения")
 
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY не найден в переменных окружения")
+
 
 router = Router()
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
-def split_sentences(text: str) -> list[str]:
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    return [sentence.strip() for sentence in sentences if len(sentence.strip()) > 30]
+async def generate_questions_with_gpt(text: str) -> str:
+    prompt = f"""
+Ты — помощник преподавателя.
 
+По тексту ниже составь ровно 10 вопросов разных типов.
 
-def make_questions(text: str) -> list[str]:
-    sentences = split_sentences(text)
-    words = re.findall(r"[А-Яа-яA-Za-zЁё]{5,}", text)
+Требования:
+1. Вопросы должны быть по содержанию текста.
+2. Используй разные типы вопросов:
+   - открытый вопрос
+   - вопрос на понимание
+   - вопрос на анализ
+   - вопрос на вывод
+   - вопрос на сравнение
+   - вопрос с кратким ответом
+   - True/False
+   - вопрос с пропуском
+   - творческий вопрос
+   - вопрос на пересказ
+3. Не пиши ответы.
+4. Нумеруй вопросы от 1 до 10.
+5. Пиши на русском языке.
 
-    if not sentences:
-        return ["Текст слишком короткий. Пришлите более содержательный .txt файл."]
+Текст:
+{text}
+"""
 
-    random.shuffle(sentences)
-    random.shuffle(words)
+    response = await openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {
+                "role": "system",
+                "content": "Ты составляешь учебные вопросы по тексту для школьников.",
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        temperature=0.7,
+        max_tokens=1200,
+    )
 
-    example_sentence = sentences[0]
-    keyword = words[0] if words else "ключевое понятие"
-
-    return [
-        "1. Открытый вопрос: Какова главная идея текста?",
-        f"2. Вопрос на понимание: Почему важно утверждение: «{example_sentence}»?",
-        "3. Вопрос с кратким ответом: Какое ключевое понятие раскрывается в тексте?",
-        "4. Вопрос на пересказ: Кратко перескажите содержание текста своими словами.",
-        "5. Вопрос на анализ: Какие аргументы или причины приводит автор?",
-        "6. Вопрос на сравнение: Какие идеи или явления можно сравнить в тексте?",
-        "7. Вопрос на вывод: Какой главный вывод можно сделать после прочтения?",
-        f"8. Вопрос с пропуском: Заполните пропуск: одно из ключевых слов текста — ________. Подсказка: «{keyword}».",
-        f"9. True/False: Верно ли, что текст связан с понятием «{keyword}»? Объясните ответ.",
-        "10. Творческий вопрос: Как можно применить идеи текста в реальной жизни?",
-    ]
+    return response.choices[0].message.content.strip()
 
 
 @router.message(CommandStart())
 async def start_handler(message: Message) -> None:
     await message.answer(
-        "Привет! Пришли мне .txt файл, а я составлю по нему 10 вопросов разных типов."
+        "Привет! Пришли мне .txt файл, а я составлю по нему 10 вопросов разных типов с помощью ChatGPT."
     )
 
 
@@ -78,6 +95,8 @@ async def document_handler(message: Message, bot: Bot) -> None:
     if not document.file_name or not document.file_name.lower().endswith(".txt"):
         await message.answer("Пожалуйста, пришлите файл именно в формате .txt.")
         return
+
+    await message.answer("Файл получил. Генерирую вопросы...")
 
     downloaded_file = await bot.download(document)
 
@@ -93,32 +112,61 @@ async def document_handler(message: Message, bot: Bot) -> None:
         try:
             text = raw_data.decode("cp1251")
         except UnicodeDecodeError:
-            await message.answer(
-                "Не удалось прочитать файл. Сохраните его в UTF-8."
-            )
+            await message.answer("Не удалось прочитать файл. Сохраните его в UTF-8.")
             return
 
     text = text.strip()
 
     if len(text) < 200:
-        await message.answer(
-            "Текст слишком короткий. Пришлите файл минимум на 200 символов."
-        )
+        await message.answer("Текст слишком короткий. Пришлите файл минимум на 200 символов.")
         return
 
-    questions = make_questions(text)
+    if len(text) > 12000:
+        text = text[:12000]
 
-    await message.answer("\n\n".join(questions))
+    try:
+        questions = await generate_questions_with_gpt(text)
+    except Exception as error:
+        logging.exception("OpenAI error")
+        await message.answer(f"Ошибка при обращении к ChatGPT: {error}")
+        return
+
+    await message.answer(questions)
 
 
-@router.message()
-async def other_handler(message: Message) -> None:
-    await message.answer(
-        "Пришлите .txt файл, и я составлю 10 вопросов по тексту."
-    )
+@router.message(F.text)
+async def text_handler(message: Message) -> None:
+    user_text = message.text.strip()
+
+    if len(user_text) < 10:
+        await message.answer("Пришлите .txt файл или задайте более подробный вопрос.")
+        return
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Ты полезный помощник. Отвечай кратко и понятно на русском языке.",
+                },
+                {
+                    "role": "user",
+                    "content": user_text,
+                },
+            ],
+            temperature=0.7,
+            max_tokens=800,
+        )
+
+        answer = response.choices[0].message.content.strip()
+        await message.answer(answer)
+
+    except Exception as error:
+        logging.exception("OpenAI text answer error")
+        await message.answer(f"Ошибка при обращении к ChatGPT: {error}")
 
 
-# ---------------- HTTP SERVER ----------------
 async def start_http_server() -> None:
     async def health_check(request: web.Request) -> web.Response:
         return web.Response(text="OK")
@@ -132,36 +180,29 @@ async def start_http_server() -> None:
     await runner.setup()
 
     site = web.TCPSite(runner, "0.0.0.0", port)
-
     await site.start()
 
-    logging.info(f"HTTP server started on port {port}")
+    logging.info("HTTP server started on 0.0.0.0:%s", port)
 
     while True:
         await asyncio.sleep(3600)
 
 
-# ---------------- TELEGRAM BOT ----------------
 async def start_bot() -> None:
     bot = Bot(
         token=BOT_TOKEN,
-        default=DefaultBotProperties(
-            parse_mode=ParseMode.HTML
-        ),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
     dp = Dispatcher()
-
     dp.include_router(router)
 
     await bot.delete_webhook(drop_pending_updates=True)
 
     logging.info("Telegram polling started")
-
     await dp.start_polling(bot)
 
 
-# ---------------- MAIN ----------------
 async def main() -> None:
     await asyncio.gather(
         start_http_server(),
