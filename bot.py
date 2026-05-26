@@ -20,12 +20,10 @@ logging.basicConfig(level=logging.INFO)
 
 print("BOT_TOKEN exists:", bool(os.getenv("BOT_TOKEN")))
 print("OPENAI_API_KEY exists:", bool(os.getenv("OPENAI_API_KEY")))
-print("OPENAI_ORG exists:", bool(os.getenv("OPENAI_ORG")))
 print("PORT:", os.getenv("PORT"))
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_ORG = os.getenv("OPENAI_ORG")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
@@ -36,7 +34,6 @@ if not OPENAI_API_KEY:
 
 openai_client = AsyncOpenAI(
     api_key=OPENAI_API_KEY,
-    organization=OPENAI_ORG if OPENAI_ORG else None,
 )
 
 router = Router()
