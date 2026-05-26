@@ -1,26 +1,28 @@
 import asyncio
 import io
+import json
 import logging
 import os
 import tempfile
+from uuid import uuid4
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
-
-print("BOT_TOKEN exists:", bool(os.getenv("BOT_TOKEN")))
-print("OPENAI_API_KEY exists:", bool(os.getenv("OPENAI_API_KEY")))
-print("PORT:", os.getenv("PORT"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -31,12 +33,12 @@ if not BOT_TOKEN:
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY не найден")
 
-
-openai_client = AsyncOpenAI(
-    api_key=OPENAI_API_KEY,
-)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 router = Router()
+
+QUIZ_STORAGE: dict[str, dict] = {}
+USER_TEXT_ANSWERS: dict[int, dict] = {}
 
 START_TEXT = (
     "Здравствуйте. Я помогу закрепить материал урока. "
@@ -44,86 +46,44 @@ START_TEXT = (
 )
 
 AUDIO_EXTENSIONS = {
-    ".mp3",
-    ".mp4",
-    ".mpeg",
-    ".mpga",
-    ".m4a",
-    ".wav",
-    ".webm",
-    ".ogg",
-    ".oga",
-    ".flac",
+    ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a",
+    ".wav", ".webm", ".ogg", ".oga", ".flac",
 }
 
 
-def get_file_extension(file_name: str | None) -> str:
-    if not file_name:
-        return ".ogg"
-
-    _, extension = os.path.splitext(file_name.lower())
-    return extension or ".ogg"
-
-
-async def generate_tasks_with_gpt(text: str) -> str:
+async def generate_quiz_json(text: str) -> list[dict]:
     prompt = f"""
-Ты — методист и помощник преподавателя.
+Составь 10 заданий по материалу урока.
 
-На основе объяснения нового материала составь задания для закрепления темы.
+Верни ТОЛЬКО валидный JSON-массив без markdown и пояснений.
 
-Обязательный формат заданий:
+Формат каждого задания:
+{{
+  "number": 1,
+  "type": "single_choice",
+  "question": "Текст вопроса",
+  "options": ["А. ...", "Б. ...", "В. ...", "Г. ..."],
+  "correct": ["А"],
+  "explanation": "Короткое объяснение"
+}}
 
-1. Вопрос с выбором одного правильного варианта ответа.
-   Дай 4 варианта ответа: А, Б, В, Г.
-   После вариантов обязательно напиши правильный ответ.
+Типы заданий:
+1-3: single_choice — один правильный ответ, 4 варианта.
+4-5: multiple_choice — несколько правильных ответов, 5 вариантов.
+6: matching_2 — соотнести 2 множества. Дай варианты ответа как готовые соответствия.
+7: matching_3_4 — соотнести 3-4 множества. Дай варианты ответа как готовые соответствия.
+8: ordering — расположить в логической или хронологической последовательности. Дай варианты последовательностей.
+9: find_errors — короткий текст с 2-3 ошибками. В вариантах дай фрагменты, которые пользователь должен выбрать.
+10: short_answer — ответ 1-2 слова. В options поставь пустой список, correct содержит правильный ответ.
 
-2. Вопрос с выбором одного правильного варианта ответа.
-   Дай 4 варианта ответа: А, Б, В, Г.
-   После вариантов обязательно напиши правильный ответ.
-
-3. Вопрос с выбором одного правильного варианта ответа.
-   Дай 4 варианта ответа: А, Б, В, Г.
-   После вариантов обязательно напиши правильный ответ.
-
-4. Вопрос с возможностью выбора нескольких правильных вариантов ответа.
-   Дай 5 вариантов ответа.
-   После вариантов обязательно напиши все правильные ответы.
-
-5. Вопрос с возможностью выбора нескольких правильных вариантов ответа.
-   Дай 5 вариантов ответа.
-   После вариантов обязательно напиши все правильные ответы.
-
-6. Задание: соотнести варианты из 2 множеств.
-   Сделай левый и правый столбец.
-   После задания обязательно напиши правильные соответствия.
-
-7. Задание: соотнести друг с другом варианты из 3-4 множеств.
-   Сделай 3 или 4 группы данных.
-   После задания обязательно напиши правильные соответствия.
-
-8. Задание: расположить элементы в хронологической или логической последовательности.
-   Дай 4-6 элементов.
-   После задания обязательно напиши правильную последовательность.
-
-9. Задание с коротким текстом.
-   Напиши короткий текст на 4-6 предложений, в котором есть 2-3 фактические ошибки по теме.
-   Пользователь должен процитировать фрагменты текста, содержащие ошибки.
-   После текста обязательно напиши правильный ответ: какие фрагменты содержат ошибки и почему.
-
-10. Задание: вписать правильный ответ самостоятельно.
-    Ответ должен состоять из 1 либо 2 слов.
-    После задания обязательно напиши правильный ответ.
-
-Важные требования:
+Правила:
 - Пиши на русском языке.
-- Не выходи за рамки предоставленного материала.
-- Формулируй задания понятно для школьника.
-- Не используй слишком сложные термины без необходимости.
-- Сохрани нумерацию от 1 до 10.
-- После каждого задания обязательно добавляй строку:
-  Правильный ответ: ...
+- Каждый вопрос должен быть понятен школьнику.
+- В correct указывай точное значение из вариантов или краткий ответ.
+- Для multiple_choice и find_errors correct может содержать несколько элементов.
+- Не выходи за рамки материала.
 
-Материал урока:
+Материал:
 {text}
 """
 
@@ -132,22 +92,23 @@ async def generate_tasks_with_gpt(text: str) -> str:
         messages=[
             {
                 "role": "system",
-                "content": "Ты создаёшь учебные задания для закрепления материала урока.",
+                "content": "Ты создаёшь интерактивные учебные задания в JSON.",
             },
             {
                 "role": "user",
                 "content": prompt,
             },
         ],
-        temperature=0.5,
-        max_tokens=2200,
+        temperature=0.4,
+        max_tokens=3000,
     )
 
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content.strip()
+    return json.loads(content)
 
 
 async def transcribe_audio(file_bytes: bytes, file_name: str) -> str:
-    extension = get_file_extension(file_name)
+    _, extension = os.path.splitext(file_name.lower())
 
     if extension not in AUDIO_EXTENSIONS:
         extension = ".ogg"
@@ -166,20 +127,75 @@ async def transcribe_audio(file_bytes: bytes, file_name: str) -> str:
     return transcription.text.strip()
 
 
-async def send_long_message(message: Message, text: str) -> None:
-    max_length = 3900
+def make_keyboard(question_id: str, options: list[str]) -> InlineKeyboardMarkup:
+    buttons = []
 
-    if len(text) <= max_length:
-        await message.answer(text)
+    for index, option in enumerate(options):
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=option[:60],
+                    callback_data=f"answer:{question_id}:{index}",
+                )
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def send_question(message: Message, question: dict) -> None:
+    question_id = str(uuid4())
+
+    QUIZ_STORAGE[question_id] = {
+        "question": question,
+        "user_id": message.from_user.id if message.from_user else None,
+    }
+
+    number = question.get("number", "?")
+    question_text = question.get("question", "")
+    options = question.get("options", [])
+    question_type = question.get("type", "")
+
+    text = f"<b>Вопрос {number}</b>\n\n{question_text}"
+
+    if question_type == "short_answer":
+        USER_TEXT_ANSWERS[message.from_user.id] = {
+            "question_id": question_id,
+            "correct": question.get("correct", []),
+            "explanation": question.get("explanation", ""),
+        }
+
+        await message.answer(
+            text + "\n\nНапишите ответ одним сообщением. Ответ должен состоять из 1-2 слов."
+        )
         return
 
-    parts = [
-        text[i : i + max_length]
-        for i in range(0, len(text), max_length)
-    ]
+    await message.answer(
+        text,
+        reply_markup=make_keyboard(question_id, options),
+    )
 
-    for part in parts:
-        await message.answer(part)
+
+async def send_quiz(message: Message, text: str) -> None:
+    if len(text) > 14000:
+        text = text[:14000]
+
+    await message.answer("Материал получен. Готовлю задания...")
+
+    try:
+        quiz = await generate_quiz_json(text)
+    except Exception as error:
+        logging.exception("Quiz generation error")
+        await message.answer(f"Ошибка при генерации заданий:\n{error}")
+        return
+
+    if not isinstance(quiz, list):
+        await message.answer("Ошибка: модель вернула неверный формат заданий.")
+        return
+
+    for question in quiz:
+        await send_question(message, question)
+        await asyncio.sleep(0.4)
 
 
 @router.message(CommandStart())
@@ -205,8 +221,6 @@ async def document_handler(message: Message, bot: Bot) -> None:
     raw_data = downloaded_file.getvalue()
 
     if file_name.endswith(".txt"):
-        await message.answer("TXT-файл получен. Готовлю задания...")
-
         try:
             text = raw_data.decode("utf-8")
         except UnicodeDecodeError:
@@ -217,20 +231,13 @@ async def document_handler(message: Message, bot: Bot) -> None:
                 return
 
     elif any(file_name.endswith(ext) for ext in AUDIO_EXTENSIONS):
-        await message.answer("Аудиофайл получен. Сначала расшифровываю его в текст...")
-
+        await message.answer("Аудиофайл получен. Расшифровываю...")
         try:
             text = await transcribe_audio(raw_data, file_name)
         except Exception as error:
             logging.exception("Audio transcription error")
             await message.answer(f"Ошибка при расшифровке аудио:\n{error}")
             return
-
-        if not text:
-            await message.answer("Не удалось получить текст из аудио.")
-            return
-
-        await message.answer("Аудио расшифровано. Готовлю задания...")
 
     else:
         await message.answer("Пришлите файл в формате TXT или аудио.")
@@ -239,20 +246,10 @@ async def document_handler(message: Message, bot: Bot) -> None:
     text = text.strip()
 
     if len(text) < 200:
-        await message.answer("Материал слишком короткий. Пришлите текст или аудио с более подробным объяснением.")
+        await message.answer("Материал слишком короткий. Пришлите более подробное объяснение.")
         return
 
-    if len(text) > 14000:
-        text = text[:14000]
-
-    try:
-        tasks = await generate_tasks_with_gpt(text)
-    except Exception as error:
-        logging.exception("OpenAI generation error")
-        await message.answer(f"Ошибка при генерации заданий:\n{error}")
-        return
-
-    await send_long_message(message, tasks)
+    await send_quiz(message, text)
 
 
 @router.message(F.voice)
@@ -265,32 +262,18 @@ async def voice_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать голосовое сообщение.")
         return
 
-    raw_data = downloaded_file.getvalue()
-
     try:
-        text = await transcribe_audio(raw_data, "voice.ogg")
+        text = await transcribe_audio(downloaded_file.getvalue(), "voice.ogg")
     except Exception as error:
         logging.exception("Voice transcription error")
         await message.answer(f"Ошибка при расшифровке голосового сообщения:\n{error}")
         return
 
-    if not text or len(text) < 200:
+    if len(text) < 200:
         await message.answer("Материал слишком короткий. Пришлите более подробное аудио.")
         return
 
-    if len(text) > 14000:
-        text = text[:14000]
-
-    await message.answer("Голосовое сообщение расшифровано. Готовлю задания...")
-
-    try:
-        tasks = await generate_tasks_with_gpt(text)
-    except Exception as error:
-        logging.exception("OpenAI generation error")
-        await message.answer(f"Ошибка при генерации заданий:\n{error}")
-        return
-
-    await send_long_message(message, tasks)
+    await send_quiz(message, text)
 
 
 @router.message(F.audio)
@@ -303,37 +286,82 @@ async def audio_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать аудио.")
         return
 
-    raw_data = downloaded_file.getvalue()
     file_name = message.audio.file_name or "audio.mp3"
 
     try:
-        text = await transcribe_audio(raw_data, file_name)
+        text = await transcribe_audio(downloaded_file.getvalue(), file_name)
     except Exception as error:
         logging.exception("Audio transcription error")
         await message.answer(f"Ошибка при расшифровке аудио:\n{error}")
         return
 
-    if not text or len(text) < 200:
+    if len(text) < 200:
         await message.answer("Материал слишком короткий. Пришлите более подробное аудио.")
         return
 
-    if len(text) > 14000:
-        text = text[:14000]
+    await send_quiz(message, text)
 
-    await message.answer("Аудио расшифровано. Готовлю задания...")
 
-    try:
-        tasks = await generate_tasks_with_gpt(text)
-    except Exception as error:
-        logging.exception("OpenAI generation error")
-        await message.answer(f"Ошибка при генерации заданий:\n{error}")
+@router.callback_query(F.data.startswith("answer:"))
+async def answer_callback(callback: CallbackQuery) -> None:
+    _, question_id, option_index = callback.data.split(":")
+    option_index = int(option_index)
+
+    stored = QUIZ_STORAGE.get(question_id)
+
+    if not stored:
+        await callback.answer("Вопрос устарел.")
         return
 
-    await send_long_message(message, tasks)
+    question = stored["question"]
+    options = question.get("options", [])
+    correct = question.get("correct", [])
+    explanation = question.get("explanation", "")
+
+    user_answer = options[option_index]
+
+    is_correct = user_answer in correct
+
+    result = "✅ Верно!" if is_correct else "❌ Неверно."
+
+    correct_text = "\n".join(correct)
+
+    await callback.message.answer(
+        f"{result}\n\n"
+        f"Ваш ответ:\n{user_answer}\n\n"
+        f"Правильный ответ:\n{correct_text}\n\n"
+        f"{explanation}"
+    )
+
+    await callback.answer()
 
 
 @router.message(F.text)
 async def text_handler(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else None
+
+    if user_id in USER_TEXT_ANSWERS:
+        data = USER_TEXT_ANSWERS.pop(user_id)
+
+        user_answer = message.text.strip().lower()
+        correct_answers = [
+            str(answer).strip().lower()
+            for answer in data["correct"]
+        ]
+
+        is_correct = user_answer in correct_answers
+
+        result = "✅ Верно!" if is_correct else "❌ Неверно."
+        correct_text = "\n".join(data["correct"])
+
+        await message.answer(
+            f"{result}\n\n"
+            f"Ваш ответ:\n{message.text.strip()}\n\n"
+            f"Правильный ответ:\n{correct_text}\n\n"
+            f"{data['explanation']}"
+        )
+        return
+
     await message.answer(START_TEXT)
 
 
