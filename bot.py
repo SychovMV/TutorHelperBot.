@@ -60,9 +60,9 @@ AUDIO_EXTENSIONS = {
 
 async def generate_quiz_json(text: str) -> list[dict]:
     prompt = f"""
-Составь 10 заданий по материалу урока.
+Составь 10 интерактивных заданий по материалу урока.
 
-Верни ТОЛЬКО валидный JSON-массив без markdown и пояснений.
+Верни ТОЛЬКО валидный JSON-массив без markdown, без ```json и без пояснений.
 
 Формат каждого задания:
 {{
@@ -71,25 +71,69 @@ async def generate_quiz_json(text: str) -> list[dict]:
   "question": "Текст вопроса",
   "options": ["А. ...", "Б. ...", "В. ...", "Г. ..."],
   "correct": ["А. ..."],
-  "explanation": "Короткое объяснение, почему этот ответ правильный"
+  "explanation": "Короткое объяснение, почему ответ правильный"
 }}
 
-Типы заданий:
-1-3: single_choice — один правильный ответ, 4 варианта.
-4-5: multiple_choice — несколько правильных ответов, 5 вариантов.
-6: matching_2 — соотнести 2 множества. Дай варианты ответа как готовые соответствия.
-7: matching_3_4 — соотнести 3-4 множества. Дай варианты ответа как готовые соответствия.
-8: ordering — расположить в логической или хронологической последовательности. Дай варианты последовательностей.
-9: find_errors — короткий текст с 2-3 ошибками. В вариантах дай фрагменты, которые пользователь должен выбрать.
-10: short_answer — ответ 1-2 слова. В options поставь пустой список, correct содержит правильный ответ.
+Обязательные типы заданий:
 
-Правила:
+1-3: single_choice — один правильный ответ.
+- В options дай ровно 4 варианта.
+- В correct укажи ровно один вариант, полностью совпадающий с одним из options.
+
+4-5: multiple_choice — несколько правильных ответов.
+- В options дай ровно 5 вариантов.
+- В correct укажи 2 или 3 правильных варианта.
+- Каждый correct должен полностью совпадать с одним из options.
+
+6: matching_2 — соотнести варианты из 2 множеств.
+- В question напиши задание и перечисли два множества прямо в тексте вопроса.
+- В options НЕ пиши названия столбцов.
+- В options дай 4 готовых варианта соответствий.
+- Каждый option должен быть полноценной парой, например:
+  "А. Термин — определение"
+  "Б. Событие — дата"
+  "В. Персонаж — действие"
+- В correct укажи все правильные пары из options.
+- Каждый correct должен полностью совпадать с одним из options.
+
+7: matching_3_4 — соотнести друг с другом варианты из 3-4 множеств.
+- В question напиши задание и перечисли 3 или 4 множества прямо в тексте вопроса.
+- В options НЕ пиши названия групп или колонок.
+- В options дай 4 готовых сложных соответствия.
+- Каждый option должен быть полноценной связкой, например:
+  "А. Имя — страна — событие"
+  "Б. Термин — признак — пример"
+  "В. Явление — причина — последствие"
+- В correct укажи все правильные связки из options.
+- Каждый correct должен полностью совпадать с одним из options.
+
+8: ordering — расположить элементы в хронологической или логической последовательности.
+- В question перечисли элементы, которые нужно упорядочить.
+- В options дай 4 готовых варианта последовательности.
+- Каждый option должен быть полной последовательностью, например:
+  "А. Сначала ..., затем ..., затем ..., в конце ..."
+- В correct укажи один правильный вариант из options.
+- correct должен полностью совпадать с одним из options.
+
+9: find_errors — найти фрагменты текста с ошибками.
+- В question напиши короткий текст на 4-6 предложений и инструкцию: "Выберите фрагменты, содержащие ошибки".
+- В тексте должно быть 2-3 фактические ошибки по теме.
+- В options дай 4-5 конкретных фрагментов из этого текста.
+- В correct укажи только фрагменты с ошибками.
+- Каждый correct должен полностью совпадать с одним из options.
+
+10: short_answer — вписать правильный ответ самостоятельно.
+- В options поставь пустой список [].
+- В correct укажи один правильный ответ из 1 или 2 слов.
+
+Общие правила:
 - Пиши на русском языке.
 - Каждый вопрос должен быть понятен школьнику.
-- В correct указывай точное значение из options.
-- Для short_answer correct содержит правильный ответ из 1-2 слов.
-- Для multiple_choice и find_errors correct может содержать несколько элементов.
 - Не выходи за рамки материала.
+- Все значения correct должны точно совпадать с вариантами из options, кроме short_answer.
+- Не используй options как заголовки колонок.
+- Не делай варианты вроде "виды рабов", "обязанности", "термины", "определения".
+- Кнопки должны быть полноценными ответами, которые пользователь может выбрать.
 
 Материал:
 {text}
@@ -100,19 +144,81 @@ async def generate_quiz_json(text: str) -> list[dict]:
         messages=[
             {
                 "role": "system",
-                "content": "Ты создаёшь интерактивные учебные задания в JSON.",
+                "content": "Ты создаёшь интерактивные учебные задания в строгом JSON-формате.",
             },
             {
                 "role": "user",
                 "content": prompt,
             },
         ],
-        temperature=0.4,
-        max_tokens=3000,
+        temperature=0.3,
+        max_tokens=3500,
     )
 
     content = response.choices[0].message.content.strip()
+    content = content.replace("```json", "").replace("```", "").strip()
+
     return json.loads(content)
+
+
+def normalize_question(question: dict, fallback_number: int) -> dict:
+    question["number"] = question.get("number", fallback_number)
+    question["type"] = question.get("type", "single_choice")
+    question["question"] = question.get("question", "Вопрос")
+    question["options"] = question.get("options", [])
+    question["correct"] = question.get("correct", [])
+    question["explanation"] = question.get("explanation", "Объяснение не указано.")
+
+    if not isinstance(question["options"], list):
+        question["options"] = []
+
+    if not isinstance(question["correct"], list):
+        question["correct"] = [str(question["correct"])]
+
+    question["options"] = [str(option).strip() for option in question["options"] if str(option).strip()]
+    question["correct"] = [str(answer).strip() for answer in question["correct"] if str(answer).strip()]
+
+    question_type = question["type"]
+
+    if question_type != "short_answer":
+        valid_correct = [
+            answer for answer in question["correct"]
+            if answer in question["options"]
+        ]
+
+        if valid_correct:
+            question["correct"] = valid_correct
+        elif question["options"]:
+            question["correct"] = [question["options"][0]]
+
+    if question_type == "single_choice":
+        question["options"] = question["options"][:4]
+        question["correct"] = question["correct"][:1]
+
+    if question_type in {"multiple_choice", "find_errors", "matching_2", "matching_3_4"}:
+        if len(question["correct"]) == 0 and question["options"]:
+            question["correct"] = [question["options"][0]]
+
+    if question_type == "ordering":
+        question["correct"] = question["correct"][:1]
+        if len(question["correct"]) == 0 and question["options"]:
+            question["correct"] = [question["options"][0]]
+
+    if question_type == "short_answer":
+        question["options"] = []
+        question["correct"] = question["correct"][:1]
+
+    return question
+
+
+def normalize_quiz(quiz: list[dict]) -> list[dict]:
+    normalized = []
+
+    for index, question in enumerate(quiz[:10], start=1):
+        if isinstance(question, dict):
+            normalized.append(normalize_question(question, index))
+
+    return normalized
 
 
 async def transcribe_audio(file_bytes: bytes, file_name: str) -> str:
@@ -149,7 +255,7 @@ def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
 
     buttons = []
 
-    if question_type in {"multiple_choice", "find_errors"}:
+    if question_type in {"multiple_choice", "find_errors", "matching_2", "matching_3_4"}:
         for index, option in enumerate(options):
             buttons.append(
                 [
@@ -168,7 +274,6 @@ def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
                 )
             ]
         )
-
     else:
         for index, option in enumerate(options):
             buttons.append(
@@ -209,14 +314,20 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
     if question_type == "short_answer":
         session["awaiting_text_answer"] = True
         text += "\n\nНапишите ответ одним сообщением. Ответ должен состоять из 1-2 слов."
-
         await message_or_callback.answer(text)
         return
 
     session["awaiting_text_answer"] = False
 
-    keyboard = make_keyboard(question, session["session_id"])
+    if not options:
+        await message_or_callback.answer(
+            text + "\n\nДля этого вопроса не удалось создать варианты ответа. Перехожу к следующему."
+        )
+        session["current_index"] += 1
+        await send_current_question(message_or_callback, user_id)
+        return
 
+    keyboard = make_keyboard(question, session["session_id"])
     await message_or_callback.answer(text, reply_markup=keyboard)
 
 
@@ -278,7 +389,7 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
 
     score = session["score"]
     total = len(session["quiz"])
-    percent = round(score / total * 100)
+    percent = round(score / total * 100) if total else 0
 
     lines = [
         "🏁 <b>Тест завершён!</b>",
@@ -301,7 +412,6 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
         lines.append("\nРекомендую ещё раз разобрать тему урока.")
 
     await message_or_callback.answer("\n".join(lines))
-
     QUIZ_SESSIONS.pop(user_id, None)
 
 
@@ -319,16 +429,15 @@ async def start_quiz_from_text(message: Message, text: str) -> None:
 
     try:
         quiz = await generate_quiz_json(text)
+        quiz = normalize_quiz(quiz)
     except Exception as error:
         logging.exception("Quiz generation error")
         await message.answer(f"Ошибка при генерации заданий:\n{error}")
         return
 
-    if not isinstance(quiz, list) or len(quiz) == 0:
+    if not quiz:
         await message.answer("Ошибка: модель вернула неверный формат заданий.")
         return
-
-    quiz = quiz[:10]
 
     QUIZ_SESSIONS[user_id] = {
         "session_id": str(uuid4()),
@@ -611,4 +720,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
