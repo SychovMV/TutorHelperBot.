@@ -41,12 +41,10 @@ openai_client = AsyncOpenAI(
 
 router = Router()
 
-
 START_TEXT = (
     "Здравствуйте. Я помогу закрепить материал урока. "
     "Пришлите объяснение нового материала в аудио формате или формате TXT"
 )
-
 
 AUDIO_EXTENSIONS = {
     ".mp3",
@@ -379,7 +377,10 @@ async def start_bot() -> None:
     dp = Dispatcher()
     dp.include_router(router)
 
-    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.delete_webhook(drop_pending_updates=False)
+
+    webhook_info = await bot.get_webhook_info()
+    logging.info("Webhook info: %s", webhook_info)
 
     logging.info("Telegram polling started")
 
