@@ -58,15 +58,6 @@ def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔁 Пройти тест снова", callback_data=f"restart_quiz:{user_id}")],
-            [InlineKeyboardButton(text="📚 Закрепить материал другого урока", callback_data=f"new_lesson:{user_id}")],
-        ]
-    )
-
-
 async def get_text_from_pending_file(user_id: int) -> str | None:
     file_data = USER_PENDING_FILES.get(user_id)
 
@@ -184,34 +175,43 @@ async def generate_quiz_json(text: str) -> list[dict]:
 
 async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
     prompt = f"""
-Ты экзаменатор. Проведи устный опрос по материалу урока.
+Ты — строгий, но доброжелательный экзаменатор.
 
-Нужно задать следующий вопрос ученику, учитывая его предыдущие ответы.
+Твоя задача — вести с учеником живой устный опрос по материалу урока.
+Вопросы нужно задавать по одному. Следующий вопрос должен зависеть:
+1. от содержания материала;
+2. от предыдущих ответов ученика;
+3. от ошибок, пробелов и сильных сторон ученика.
 
-Верни ТОЛЬКО JSON-объект:
+Верни ТОЛЬКО JSON-объект без markdown:
 {{
   "question": "Следующий вопрос ученику",
-  "difficulty": "easy|medium|hard"
+  "reason": "Почему ты задаёшь именно этот вопрос"
 }}
 
 Правила:
-- Задавай только один вопрос.
-- Не давай ответ.
-- Если ученик ранее ошибался, задай уточняющий или более простой вопрос.
-- Если отвечал хорошо, задай более глубокий вопрос.
-- Вопрос должен проверять понимание материала.
+- Задай только один вопрос.
+- Не давай ответ на свой вопрос.
+- Не составляй список вопросов заранее.
+- Если ученик ответил слабо, задай более простой или уточняющий вопрос.
+- Если ученик ответил хорошо, задай более глубокий вопрос.
+- Вопрос должен звучать как на устном экзамене.
+- Вопрос должен проверять понимание, а не угадывание.
+- Не задавай вопросы, на которые можно ответить только «да» или «нет».
+- Не выходи за рамки материала урока.
+- Пиши на русском языке.
 
 Материал урока:
 {lesson_text[:12000]}
 
-История ответов:
+История диалога:
 {json.dumps(history, ensure_ascii=False)}
 """
 
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "Ты проводишь устный экзамен по материалу урока."},
+            {"role": "system", "content": "Ты проводишь устный опрос по учебному материалу."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.5,
@@ -225,20 +225,28 @@ async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
 
 async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> dict:
     prompt = f"""
-Оцени ответ ученика на вопрос по материалу урока.
+Оцени ответ ученика на устный вопрос по материалу урока.
 
-Верни ТОЛЬКО JSON-объект:
+Верни ТОЛЬКО JSON-объект без markdown:
 {{
-  "is_correct": true,
   "score": 0,
-  "feedback": "Короткая обратная связь",
-  "correct_answer": "Краткий правильный ответ"
+  "feedback": "Развёрнутый комментарий ученику",
+  "correct_answer": "Как можно было ответить лучше",
+  "what_to_ask_next": "Что стоит проверить следующим вопросом"
 }}
 
-score — число от 0 до 2:
-0 — неверно
-1 — частично верно
-2 — верно
+score:
+0 — ответ неверный или почти отсутствует
+1 — ответ частично верный
+2 — ответ верный и достаточно полный
+
+Правила оценки:
+- Сравнивай ответ только с материалом урока.
+- Если ученик уловил часть смысла, поставь 1.
+- Если ученик дал правильный и полный ответ, поставь 2.
+- В feedback объясни, что именно получилось, а что пропущено.
+- В correct_answer дай пример хорошего ответа.
+- В what_to_ask_next укажи, какой аспект стоит проверить дальше.
 
 Материал урока:
 {lesson_text[:12000]}
@@ -253,11 +261,11 @@ score — число от 0 до 2:
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "Ты проверяешь устный ответ ученика."},
+            {"role": "system", "content": "Ты проверяешь устный ответ ученика по учебному материалу."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
-        max_tokens=800,
+        max_tokens=900,
     )
 
     content = response.choices[0].message.content.strip()
@@ -464,7 +472,6 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
     number = question.get("number", index + 1)
     question_text = question.get("question", "")
     question_type = question.get("type", "")
-    options = question.get("options", [])
 
     text = f"<b>Вопрос {number} из {len(quiz)}</b>\n\n{question_text}"
 
@@ -547,14 +554,12 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
     total = len(session["quiz"])
     percent = round(score / total * 100) if total else 0
 
-    lines = [
-        "🏁 <b>Тест завершён!</b>",
-        "",
-        f"Правильных ответов: <b>{score} из {total}</b>",
-        f"Результат: <b>{percent}%</b>",
-    ]
+    await message_or_callback.answer(
+        f"🏁 <b>Тест завершён!</b>\n\n"
+        f"Правильных ответов: <b>{score} из {total}</b>\n"
+        f"Результат: <b>{percent}%</b>"
+    )
 
-    await message_or_callback.answer("\n".join(lines))
     QUIZ_SESSIONS.pop(user_id, None)
 
 
@@ -611,9 +616,14 @@ async def start_oral_from_text(message: Message, text: str) -> None:
         "current_question": None,
         "question_count": 0,
         "score": 0,
+        "max_questions": 10,
     }
 
-    await message.answer("Начинаем режим вопрос-ответ. Я буду задавать вопросы как на устном экзамене.")
+    await message.answer(
+        "Начинаем режим вопрос-ответ.\n\n"
+        "Я буду задавать вопросы по одному, как на устном экзамене. "
+        "Следующий вопрос будет зависеть от вашего предыдущего ответа."
+    )
 
     await send_next_oral_question(message, user_id)
 
@@ -624,23 +634,29 @@ async def send_next_oral_question(message: Message, user_id: int) -> None:
     if not session:
         return
 
-    if session["question_count"] >= 10:
+    if session["question_count"] >= session["max_questions"]:
         await finish_oral(message, user_id)
         return
 
     try:
-        question_data = await generate_oral_question(session["lesson_text"], session["history"])
+        question_data = await generate_oral_question(
+            lesson_text=session["lesson_text"],
+            history=session["history"],
+        )
     except Exception as error:
         logging.exception("Oral question generation error")
         await message.answer(f"Ошибка при генерации вопроса:\n{error}")
         return
 
     question = question_data.get("question", "Расскажите главное по теме.")
+
     session["current_question"] = question
     session["question_count"] += 1
 
     await message.answer(
-        f"<b>Вопрос {session['question_count']} из 10</b>\n\n{question}\n\nОтветьте одним сообщением."
+        f"<b>Вопрос {session['question_count']}</b>\n\n"
+        f"{question}\n\n"
+        "Ответьте одним сообщением."
     )
 
 
@@ -650,11 +666,19 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
     if not session:
         return
 
-    answer = message.text.strip()
-    question = session["current_question"]
+    user_answer = message.text.strip()
+    current_question = session.get("current_question")
+
+    if not current_question:
+        await send_next_oral_question(message, user_id)
+        return
 
     try:
-        evaluation = await evaluate_oral_answer(session["lesson_text"], question, answer)
+        evaluation = await evaluate_oral_answer(
+            lesson_text=session["lesson_text"],
+            question=current_question,
+            answer=user_answer,
+        )
     except Exception as error:
         logging.exception("Oral evaluation error")
         await message.answer(f"Ошибка при проверке ответа:\n{error}")
@@ -663,22 +687,25 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
     score = int(evaluation.get("score", 0))
     feedback = evaluation.get("feedback", "")
     correct_answer = evaluation.get("correct_answer", "")
+    what_to_ask_next = evaluation.get("what_to_ask_next", "")
 
     session["score"] += score
+
     session["history"].append(
         {
-            "question": question,
-            "answer": answer,
+            "question": current_question,
+            "answer": user_answer,
             "score": score,
             "feedback": feedback,
             "correct_answer": correct_answer,
+            "what_to_ask_next": what_to_ask_next,
         }
     )
 
     await message.answer(
         f"<b>Оценка:</b> {score}/2\n\n"
         f"<b>Комментарий:</b>\n{feedback}\n\n"
-        f"<b>Пример правильного ответа:</b>\n{correct_answer}"
+        f"<b>Как можно было ответить лучше:</b>\n{correct_answer}"
     )
 
     await asyncio.sleep(0.8)
@@ -692,14 +719,23 @@ async def finish_oral(message: Message, user_id: int) -> None:
         return
 
     score = session["score"]
-    total = 20
-    percent = round(score / total * 100)
+    total = session["question_count"] * 2
+    percent = round(score / total * 100) if total else 0
 
-    await message.answer(
-        f"🏁 <b>Устный опрос завершён!</b>\n\n"
-        f"Результат: <b>{score} из {total}</b>\n"
-        f"Процент: <b>{percent}%</b>"
-    )
+    lines = [
+        "🏁 <b>Устный опрос завершён!</b>",
+        "",
+        f"Результат: <b>{score} из {total}</b>",
+        f"Процент: <b>{percent}%</b>",
+        "",
+        "<b>Краткая статистика:</b>",
+    ]
+
+    for index, item in enumerate(session["history"], start=1):
+        mark = "✅" if item["score"] == 2 else "🟡" if item["score"] == 1 else "❌"
+        lines.append(f"{mark} Вопрос {index}: {item['score']}/2")
+
+    await message.answer("\n".join(lines))
 
     ORAL_SESSIONS.pop(user_id, None)
 
@@ -819,7 +855,6 @@ async def mode_test_callback(callback: CallbackQuery) -> None:
         return
 
     await callback.answer()
-
     await callback.message.answer("Обрабатываю файл и готовлю тест...")
 
     try:
@@ -846,8 +881,7 @@ async def mode_oral_callback(callback: CallbackQuery) -> None:
         return
 
     await callback.answer()
-
-    await callback.message.answer("Обрабатываю файл и готовлю устный опрос...")
+    await callback.message.answer("Обрабатываю файл и начинаю устный опрос...")
 
     try:
         text = await get_text_from_pending_file(user_id)
