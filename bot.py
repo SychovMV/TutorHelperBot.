@@ -48,8 +48,16 @@ START_TEXT = (
 )
 
 AUDIO_EXTENSIONS = {
-    ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a",
-    ".wav", ".webm", ".ogg", ".oga", ".flac",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpga",
+    ".m4a",
+    ".wav",
+    ".webm",
+    ".ogg",
+    ".oga",
+    ".flac",
 }
 
 
@@ -73,7 +81,7 @@ async def generate_quiz_json(text: str) -> list[dict]:
 {{
   "number": 6,
   "type": "matching_2",
-  "question": "Соотнесите элементы двух списков:\\n\\nСписок 1:\\n1. ...\\n2. ...\\n3. ...\\n4. ...\\n\\n    Список 2:\\nА. ...\\nБ. ...\\nВ. ...\\nГ. ...\\n\\nВведите ответ в формате: 1а 2б 3в 4г",
+  "question": "Соотнесите элементы двух списков:\\n\\nСписок 1:\\n1. ...\\n2. ...\\n3. ...\\n4. ...\\n\\n    Список 2:\\nА. ...\\nБ. ...\\nВ. ...\\nГ. ...",
   "options": [],
   "correct": ["1а 2б 3в 4г"],
   "explanation": "Короткое объяснение правильных соответствий"
@@ -98,7 +106,7 @@ async def generate_quiz_json(text: str) -> list[dict]:
 - Первый список обозначай цифрами: 1, 2, 3, 4.
 - Второй список обозначай буквами: А, Б, В, Г.
 - Второй список должен начинаться после абзацного отступа: \\n\\n    Список 2:
-- В конце question напиши: "Введите ответ в формате: 1а 2б 3в 4г".
+- НЕ добавляй в question инструкцию про формат ответа — бот добавит её сам.
 - В correct укажи одну строку с правильным соответствием, например: ["1а 2в 3б 4г"].
 
 7: matching_3_4 — соотнести варианты из 3-4 множеств.
@@ -111,7 +119,7 @@ async def generate_quiz_json(text: str) -> list[dict]:
 - Второй список обозначай буквами: А, Б, В, Г.
 - Третий список обозначай римскими цифрами: I, II, III, IV.
 - Если нужен четвёртый список, обозначай его маленькими буквами: а, б, в, г.
-- В конце question напиши пример формата ответа, например: "1аI 2бII 3вIII 4гIV".
+- НЕ добавляй в question инструкцию про формат ответа — бот добавит её сам.
 - В correct укажи одну строку с правильным соответствием.
 
 8: ordering — расположить элементы в хронологической или логической последовательности.
@@ -132,6 +140,8 @@ async def generate_quiz_json(text: str) -> list[dict]:
 - Нельзя использовать длинные определения.
 - Нельзя использовать целые предложения.
 - Вопрос должен спрашивать термин, имя, понятие, дату, место или короткое название.
+- Пример хорошего ответа: ["раб"], ["патриции"], ["римское право"].
+- Пример плохого ответа: ["Человек, лишенный прав и свободы, принадлежащий другому человеку"].
 
 Общие правила:
 - Пиши на русском языке.
@@ -149,8 +159,14 @@ async def generate_quiz_json(text: str) -> list[dict]:
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "Ты создаёшь интерактивные учебные задания в строгом JSON-формате."},
-            {"role": "user", "content": prompt},
+            {
+                "role": "system",
+                "content": "Ты создаёшь интерактивные учебные задания в строгом JSON-формате.",
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
         ],
         temperature=0.3,
         max_tokens=3500,
@@ -158,11 +174,13 @@ async def generate_quiz_json(text: str) -> list[dict]:
 
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
+
     return json.loads(content)
 
 
 def count_words(text: str) -> int:
-    return len(re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text))
+    words = re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text)
+    return len(words)
 
 
 async def repair_short_answer_question(question: dict, lesson_text: str) -> dict:
@@ -181,6 +199,14 @@ async def repair_short_answer_question(question: dict, lesson_text: str) -> dict
   "explanation": "Короткое объяснение"
 }}
 
+Требования:
+- correct должен содержать только один ответ.
+- Ответ должен быть строго 1 или 2 слова.
+- Нельзя использовать длинное определение.
+- Нельзя использовать предложение.
+- Вопрос должен спрашивать термин, имя, понятие, дату, место или короткое название.
+- Не выходи за рамки материала.
+
 Старое задание:
 {json.dumps(question, ensure_ascii=False)}
 
@@ -191,8 +217,14 @@ async def repair_short_answer_question(question: dict, lesson_text: str) -> dict
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "Ты исправляешь учебное задание в строгом JSON-формате."},
-            {"role": "user", "content": repair_prompt},
+            {
+                "role": "system",
+                "content": "Ты исправляешь учебное задание в строгом JSON-формате.",
+            },
+            {
+                "role": "user",
+                "content": repair_prompt,
+            },
         ],
         temperature=0.2,
         max_tokens=900,
@@ -251,8 +283,17 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
     if not isinstance(question["correct"], list):
         question["correct"] = [str(question["correct"])]
 
-    question["options"] = [str(option).strip() for option in question["options"] if str(option).strip()]
-    question["correct"] = [str(answer).strip() for answer in question["correct"] if str(answer).strip()]
+    question["options"] = [
+        str(option).strip()
+        for option in question["options"]
+        if str(option).strip()
+    ]
+
+    question["correct"] = [
+        str(answer).strip()
+        for answer in question["correct"]
+        if str(answer).strip()
+    ]
 
     question_type = question["type"]
 
@@ -262,7 +303,11 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
         return question
 
     if question_type != "short_answer":
-        valid_correct = [answer for answer in question["correct"] if answer in question["options"]]
+        valid_correct = [
+            answer for answer in question["correct"]
+            if answer in question["options"]
+        ]
+
         if valid_correct:
             question["correct"] = valid_correct
         elif question["options"]:
@@ -284,23 +329,30 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
     if question_type == "short_answer":
         question["options"] = []
         question["correct"] = question["correct"][:1]
+
         if not question["correct"] or count_words(question["correct"][0]) > 2:
             question["correct"] = ["ответ"]
-            question["explanation"] = "Модель вернула слишком длинный ответ. Попробуйте отправить материал ещё раз."
+            question["explanation"] = (
+                "Модель вернула слишком длинный ответ. "
+                "Попробуйте отправить материал ещё раз."
+            )
 
     return question
 
 
 def normalize_quiz(quiz: list[dict]) -> list[dict]:
     normalized = []
+
     for index, question in enumerate(quiz[:10], start=1):
         if isinstance(question, dict):
             normalized.append(normalize_question(question, index))
+
     return normalized
 
 
 async def transcribe_audio(file_bytes: bytes, file_name: str) -> str:
     _, extension = os.path.splitext(file_name.lower())
+
     if extension not in AUDIO_EXTENSIONS:
         extension = ".ogg"
 
@@ -324,10 +376,16 @@ def normalize_answer(text: str) -> str:
 
 def normalize_matching_answer(text: str) -> str:
     text = normalize_answer(text)
-    text = text.replace("-", "").replace("—", "").replace("–", "")
-    text = text.replace(",", " ").replace(";", " ")
+    text = text.replace("-", "")
+    text = text.replace("—", "")
+    text = text.replace("–", "")
+    text = text.replace(",", " ")
+    text = text.replace(";", " ")
     text = re.sub(r"\s+", " ", text).strip()
-    return " ".join(sorted(text.split()))
+
+    parts = text.split()
+
+    return " ".join(sorted(parts))
 
 
 def get_user_id_from_message(message: Message) -> int | None:
@@ -342,27 +400,33 @@ def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
 
     if question_type in {"multiple_choice", "find_errors"}:
         for index, option in enumerate(options):
-            buttons.append([
-                InlineKeyboardButton(
-                    text=option[:60],
-                    callback_data=f"toggle:{session_id}:{index}",
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text="✅ Ответить",
-                callback_data=f"submit:{session_id}",
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=option[:60],
+                        callback_data=f"toggle:{session_id}:{index}",
+                    )
+                ]
             )
-        ])
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ Ответить",
+                    callback_data=f"submit:{session_id}",
+                )
+            ]
+        )
     else:
         for index, option in enumerate(options):
-            buttons.append([
-                InlineKeyboardButton(
-                    text=option[:60],
-                    callback_data=f"single:{session_id}:{index}",
-                )
-            ])
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=option[:60],
+                        callback_data=f"single:{session_id}:{index}",
+                    )
+                ]
+            )
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -414,8 +478,10 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
 
         if question_type == "short_answer":
             text += "\n\nНапишите ответ одним сообщением. Ответ должен состоять из 1-2 слов."
-        else:
-            text += "\n\nНапишите ответ одним сообщением."
+        elif question_type == "matching_2":
+            text += "\n\nВведите ответ в формате: 1а 2б 3в 4г"
+        elif question_type == "matching_3_4":
+            text += "\n\nВведите ответ в формате: 1аI 2бII 3вIII 4гIV"
 
         await message_or_callback.answer(text)
         return
@@ -430,10 +496,9 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
         await send_current_question(message_or_callback, user_id)
         return
 
-    await message_or_callback.answer(
-        text,
-        reply_markup=make_keyboard(question, session["session_id"]),
-    )
+    keyboard = make_keyboard(question, session["session_id"])
+
+    await message_or_callback.answer(text, reply_markup=keyboard)
 
 
 async def show_answer_and_next(message: Message, user_id: int, user_answer, is_correct: bool) -> None:
@@ -569,9 +634,7 @@ async def restart_quiz_from_last_text(callback: CallbackQuery, user_id: int) -> 
     lesson_text = USER_LAST_LESSON_TEXT.get(user_id)
 
     if not lesson_text:
-        await callback.message.answer(
-            "Не нашёл предыдущий материал. Пришлите TXT или аудио ещё раз."
-        )
+        await callback.message.answer("Не нашёл предыдущий материал. Пришлите TXT или аудио ещё раз.")
         return
 
     await callback.message.answer("Создаю новый тест по тому же материалу...")
@@ -798,7 +861,12 @@ async def submit_multiple_callback(callback: CallbackQuery) -> None:
     correct = question.get("correct", [])
 
     selected_indexes = sorted(session["selected"])
-    user_answers = [options[index] for index in selected_indexes if index < len(options)]
+
+    user_answers = [
+        options[index]
+        for index in selected_indexes
+        if index < len(options)
+    ]
 
     is_correct = set(user_answers) == set(correct)
 
