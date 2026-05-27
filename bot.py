@@ -37,7 +37,9 @@ if not OPENAI_API_KEY:
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 router = Router()
+
 QUIZ_SESSIONS: dict[int, dict] = {}
+USER_LAST_LESSON_TEXT: dict[int, str] = {}
 
 START_TEXT = (
     "Здравствуйте. Я помогу закрепить материал урока. "
@@ -130,8 +132,6 @@ async def generate_quiz_json(text: str) -> list[dict]:
 - Нельзя использовать длинные определения.
 - Нельзя использовать целые предложения.
 - Вопрос должен спрашивать термин, имя, понятие, дату, место или короткое название.
-- Пример хорошего ответа: ["раб"], ["патриции"], ["римское право"].
-- Пример плохого ответа: ["Человек, лишенный прав и свободы, принадлежащий другому человеку"].
 
 Общие правила:
 - Пиши на русском языке.
@@ -149,14 +149,8 @@ async def generate_quiz_json(text: str) -> list[dict]:
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {
-                "role": "system",
-                "content": "Ты создаёшь интерактивные учебные задания в строгом JSON-формате.",
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
+            {"role": "system", "content": "Ты создаёшь интерактивные учебные задания в строгом JSON-формате."},
+            {"role": "user", "content": prompt},
         ],
         temperature=0.3,
         max_tokens=3500,
@@ -164,13 +158,11 @@ async def generate_quiz_json(text: str) -> list[dict]:
 
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
-
     return json.loads(content)
 
 
 def count_words(text: str) -> int:
-    words = re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text)
-    return len(words)
+    return len(re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text))
 
 
 async def repair_short_answer_question(question: dict, lesson_text: str) -> dict:
@@ -189,14 +181,6 @@ async def repair_short_answer_question(question: dict, lesson_text: str) -> dict
   "explanation": "Короткое объяснение"
 }}
 
-Требования:
-- correct должен содержать только один ответ.
-- Ответ должен быть строго 1 или 2 слова.
-- Нельзя использовать длинное определение.
-- Нельзя использовать предложение.
-- Вопрос должен спрашивать термин, имя, понятие, дату, место или короткое название.
-- Не выходи за рамки материала.
-
 Старое задание:
 {json.dumps(question, ensure_ascii=False)}
 
@@ -207,14 +191,8 @@ async def repair_short_answer_question(question: dict, lesson_text: str) -> dict
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {
-                "role": "system",
-                "content": "Ты исправляешь учебное задание в строгом JSON-формате.",
-            },
-            {
-                "role": "user",
-                "content": repair_prompt,
-            },
+            {"role": "system", "content": "Ты исправляешь учебное задание в строгом JSON-формате."},
+            {"role": "user", "content": repair_prompt},
         ],
         temperature=0.2,
         max_tokens=900,
@@ -273,17 +251,8 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
     if not isinstance(question["correct"], list):
         question["correct"] = [str(question["correct"])]
 
-    question["options"] = [
-        str(option).strip()
-        for option in question["options"]
-        if str(option).strip()
-    ]
-
-    question["correct"] = [
-        str(answer).strip()
-        for answer in question["correct"]
-        if str(answer).strip()
-    ]
+    question["options"] = [str(option).strip() for option in question["options"] if str(option).strip()]
+    question["correct"] = [str(answer).strip() for answer in question["correct"] if str(answer).strip()]
 
     question_type = question["type"]
 
@@ -293,11 +262,7 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
         return question
 
     if question_type != "short_answer":
-        valid_correct = [
-            answer for answer in question["correct"]
-            if answer in question["options"]
-        ]
-
+        valid_correct = [answer for answer in question["correct"] if answer in question["options"]]
         if valid_correct:
             question["correct"] = valid_correct
         elif question["options"]:
@@ -319,30 +284,23 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
     if question_type == "short_answer":
         question["options"] = []
         question["correct"] = question["correct"][:1]
-
         if not question["correct"] or count_words(question["correct"][0]) > 2:
             question["correct"] = ["ответ"]
-            question["explanation"] = (
-                "Модель вернула слишком длинный ответ. "
-                "Попробуйте отправить материал ещё раз."
-            )
+            question["explanation"] = "Модель вернула слишком длинный ответ. Попробуйте отправить материал ещё раз."
 
     return question
 
 
 def normalize_quiz(quiz: list[dict]) -> list[dict]:
     normalized = []
-
     for index, question in enumerate(quiz[:10], start=1):
         if isinstance(question, dict):
             normalized.append(normalize_question(question, index))
-
     return normalized
 
 
 async def transcribe_audio(file_bytes: bytes, file_name: str) -> str:
     _, extension = os.path.splitext(file_name.lower())
-
     if extension not in AUDIO_EXTENSIONS:
         extension = ".ogg"
 
@@ -366,16 +324,10 @@ def normalize_answer(text: str) -> str:
 
 def normalize_matching_answer(text: str) -> str:
     text = normalize_answer(text)
-    text = text.replace("-", "")
-    text = text.replace("—", "")
-    text = text.replace("–", "")
-    text = text.replace(",", " ")
-    text = text.replace(";", " ")
+    text = text.replace("-", "").replace("—", "").replace("–", "")
+    text = text.replace(",", " ").replace(";", " ")
     text = re.sub(r"\s+", " ", text).strip()
-
-    parts = text.split()
-
-    return " ".join(sorted(parts))
+    return " ".join(sorted(text.split()))
 
 
 def get_user_id_from_message(message: Message) -> int | None:
@@ -390,35 +342,48 @@ def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
 
     if question_type in {"multiple_choice", "find_errors"}:
         for index, option in enumerate(options):
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text=option[:60],
-                        callback_data=f"toggle:{session_id}:{index}",
-                    )
-                ]
-            )
-
-        buttons.append(
-            [
+            buttons.append([
                 InlineKeyboardButton(
-                    text="✅ Ответить",
-                    callback_data=f"submit:{session_id}",
+                    text=option[:60],
+                    callback_data=f"toggle:{session_id}:{index}",
                 )
-            ]
-        )
+            ])
+
+        buttons.append([
+            InlineKeyboardButton(
+                text="✅ Ответить",
+                callback_data=f"submit:{session_id}",
+            )
+        ])
     else:
         for index, option in enumerate(options):
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text=option[:60],
-                        callback_data=f"single:{session_id}:{index}",
-                    )
-                ]
-            )
+            buttons.append([
+                InlineKeyboardButton(
+                    text=option[:60],
+                    callback_data=f"single:{session_id}:{index}",
+                )
+            ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔁 Пройти тест снова",
+                    callback_data=f"restart_quiz:{user_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📚 Закрепить материал другого урока",
+                    callback_data=f"new_lesson:{user_id}",
+                )
+            ],
+        ]
+    )
 
 
 async def send_current_question(message_or_callback, user_id: int) -> None:
@@ -465,8 +430,10 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
         await send_current_question(message_or_callback, user_id)
         return
 
-    keyboard = make_keyboard(question, session["session_id"])
-    await message_or_callback.answer(text, reply_markup=keyboard)
+    await message_or_callback.answer(
+        text,
+        reply_markup=make_keyboard(question, session["session_id"]),
+    )
 
 
 async def show_answer_and_next(message: Message, user_id: int, user_answer, is_correct: bool) -> None:
@@ -549,7 +516,11 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
     else:
         lines.append("\nРекомендую ещё раз разобрать тему урока.")
 
-    await message_or_callback.answer("\n".join(lines))
+    await message_or_callback.answer(
+        "\n".join(lines),
+        reply_markup=finish_keyboard(user_id),
+    )
+
     QUIZ_SESSIONS.pop(user_id, None)
 
 
@@ -562,6 +533,8 @@ async def start_quiz_from_text(message: Message, text: str) -> None:
 
     if len(text) > 14000:
         text = text[:14000]
+
+    USER_LAST_LESSON_TEXT[user_id] = text
 
     await message.answer("Материал получен. Готовлю тест...")
 
@@ -592,9 +565,72 @@ async def start_quiz_from_text(message: Message, text: str) -> None:
     await send_current_question(message, user_id)
 
 
+async def restart_quiz_from_last_text(callback: CallbackQuery, user_id: int) -> None:
+    lesson_text = USER_LAST_LESSON_TEXT.get(user_id)
+
+    if not lesson_text:
+        await callback.message.answer(
+            "Не нашёл предыдущий материал. Пришлите TXT или аудио ещё раз."
+        )
+        return
+
+    await callback.message.answer("Создаю новый тест по тому же материалу...")
+
+    try:
+        quiz = await generate_quiz_json(lesson_text)
+        quiz = await repair_invalid_short_answers(quiz, lesson_text)
+        quiz = normalize_quiz(quiz)
+    except Exception as error:
+        logging.exception("Restart quiz generation error")
+        await callback.message.answer(f"Ошибка при генерации нового теста:\n{error}")
+        return
+
+    QUIZ_SESSIONS[user_id] = {
+        "session_id": str(uuid4()),
+        "quiz": quiz,
+        "current_index": 0,
+        "score": 0,
+        "answers": [],
+        "selected": set(),
+        "awaiting_text_answer": False,
+    }
+
+    await callback.message.answer("Новый тест готов. Начинаем!")
+    await send_current_question(callback.message, user_id)
+
+
 @router.message(CommandStart())
 async def start_handler(message: Message) -> None:
     await message.answer(START_TEXT)
+
+
+@router.callback_query(F.data.startswith("restart_quiz:"))
+async def restart_quiz_callback(callback: CallbackQuery) -> None:
+    _, callback_user_id = callback.data.split(":")
+    user_id = callback.from_user.id
+
+    if str(user_id) != callback_user_id:
+        await callback.answer("Эта кнопка не для вас.")
+        return
+
+    await callback.answer()
+    await restart_quiz_from_last_text(callback, user_id)
+
+
+@router.callback_query(F.data.startswith("new_lesson:"))
+async def new_lesson_callback(callback: CallbackQuery) -> None:
+    _, callback_user_id = callback.data.split(":")
+    user_id = callback.from_user.id
+
+    if str(user_id) != callback_user_id:
+        await callback.answer("Эта кнопка не для вас.")
+        return
+
+    QUIZ_SESSIONS.pop(user_id, None)
+    USER_LAST_LESSON_TEXT.pop(user_id, None)
+
+    await callback.answer()
+    await callback.message.answer(START_TEXT)
 
 
 @router.message(F.document)
@@ -762,12 +798,7 @@ async def submit_multiple_callback(callback: CallbackQuery) -> None:
     correct = question.get("correct", [])
 
     selected_indexes = sorted(session["selected"])
-
-    user_answers = [
-        options[index]
-        for index in selected_indexes
-        if index < len(options)
-    ]
+    user_answers = [options[index] for index in selected_indexes if index < len(options)]
 
     is_correct = set(user_answers) == set(correct)
 
@@ -825,12 +856,7 @@ async def start_http_server() -> None:
     runner = web.AppRunner(app)
     await runner.setup()
 
-    site = web.TCPSite(
-        runner,
-        "0.0.0.0",
-        port,
-    )
-
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
     logging.info("HTTP server started on port %s", port)
@@ -842,9 +868,7 @@ async def start_http_server() -> None:
 async def start_bot() -> None:
     bot = Bot(
         token=BOT_TOKEN,
-        default=DefaultBotProperties(
-            parse_mode=ParseMode.HTML,
-        ),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
     dp = Dispatcher()
@@ -856,7 +880,6 @@ async def start_bot() -> None:
     logging.info("Webhook info: %s", webhook_info)
 
     logging.info("Telegram polling started")
-
     await dp.start_polling(bot)
 
 
