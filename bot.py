@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
 from uuid import uuid4
 
@@ -41,7 +42,7 @@ QUIZ_SESSIONS: dict[int, dict] = {}
 
 START_TEXT = (
     "Здравствуйте. Я помогу закрепить материал урока. "
-    "Пришлите объяснение нового материала в аудио формате или формате TXT"
+    "Пришлите объяснение нового материала в аудио формате или формате TXT \n\n Пришлите файл в качестве ответа на это сообщение"
 )
 
 AUDIO_EXTENSIONS = {
@@ -64,14 +65,24 @@ async def generate_quiz_json(text: str) -> list[dict]:
 
 Верни ТОЛЬКО валидный JSON-массив без markdown, без ```json и без пояснений.
 
-Формат каждого задания:
+Формат обычного задания:
 {{
   "number": 1,
   "type": "single_choice",
   "question": "Текст вопроса",
   "options": ["А. ...", "Б. ...", "В. ...", "Г. ..."],
   "correct": ["А. ..."],
-  "explanation": "Короткое объяснение, почему ответ правильный"
+  "explanation": "Короткое объяснение"
+}}
+
+Формат задания на соотнесение:
+{{
+  "number": 6,
+  "type": "matching_2",
+  "question": "Соотнесите элементы двух столбцов:\\n\\n<pre>1. Понятие        А. Определение\\n2. Понятие        Б. Определение\\n3. Понятие        В. Определение</pre>\\n\\nВведите ответ в формате: 1а 2б 3в",
+  "options": [],
+  "correct": ["1а 2б 3в"],
+  "explanation": "Короткое объяснение правильных соответствий"
 }}
 
 Обязательные типы заданий:
@@ -86,54 +97,47 @@ async def generate_quiz_json(text: str) -> list[dict]:
 - Каждый correct должен полностью совпадать с одним из options.
 
 6: matching_2 — соотнести варианты из 2 множеств.
-- В question напиши задание и перечисли два множества прямо в тексте вопроса.
-- В options НЕ пиши названия столбцов.
-- В options дай 4 готовых варианта соответствий.
-- Каждый option должен быть полноценной парой, например:
-  "А. Термин — определение"
-  "Б. Событие — дата"
-  "В. Персонаж — действие"
-- В correct укажи все правильные пары из options.
-- Каждый correct должен полностью совпадать с одним из options.
+- НЕ делай кнопки.
+- options должен быть пустым списком [].
+- В question обязательно сделай два столбца рядом, желательно через <pre>.
+- Левый столбец обозначай цифрами: 1, 2, 3, 4.
+- Правый столбец обозначай буквами: А, Б, В, Г.
+- В конце question напиши: "Введите ответ в формате: 1а 2б 3в 4г".
+- В correct укажи одну строку с правильным соответствием, например: ["1а 2в 3б 4г"].
 
-7: matching_3_4 — соотнести друг с другом варианты из 3-4 множеств.
-- В question напиши задание и перечисли 3 или 4 множества прямо в тексте вопроса.
-- В options НЕ пиши названия групп или колонок.
-- В options дай 4 готовых сложных соответствия.
-- Каждый option должен быть полноценной связкой, например:
-  "А. Имя — страна — событие"
-  "Б. Термин — признак — пример"
-  "В. Явление — причина — последствие"
-- В correct укажи все правильные связки из options.
-- Каждый correct должен полностью совпадать с одним из options.
+7: matching_3_4 — соотнести варианты из 3-4 множеств.
+- НЕ делай кнопки.
+- options должен быть пустым списком [].
+- В question сделай таблицу с 3 или 4 столбцами.
+- Первый столбец обозначай цифрами: 1, 2, 3, 4.
+- Второй столбец обозначай буквами: А, Б, В, Г.
+- Третий столбец обозначай римскими цифрами: I, II, III, IV.
+- Если нужен четвёртый столбец, обозначай его маленькими буквами: а, б, в, г.
+- В конце question напиши пример формата ответа, например: "1аI 2бII 3вIII 4гIV".
+- В correct укажи одну строку с правильным соответствием.
 
 8: ordering — расположить элементы в хронологической или логической последовательности.
 - В question перечисли элементы, которые нужно упорядочить.
 - В options дай 4 готовых варианта последовательности.
-- Каждый option должен быть полной последовательностью, например:
-  "А. Сначала ..., затем ..., затем ..., в конце ..."
 - В correct укажи один правильный вариант из options.
-- correct должен полностью совпадать с одним из options.
 
 9: find_errors — найти фрагменты текста с ошибками.
 - В question напиши короткий текст на 4-6 предложений и инструкцию: "Выберите фрагменты, содержащие ошибки".
-- В тексте должно быть 2-3 фактические ошибки по теме.
-- В options дай 4-5 конкретных фрагментов из этого текста.
+- В тексте должно быть 2-3 фактические ошибки.
+- В options дай 4-5 конкретных фрагментов из текста.
 - В correct укажи только фрагменты с ошибками.
-- Каждый correct должен полностью совпадать с одним из options.
 
 10: short_answer — вписать правильный ответ самостоятельно.
-- В options поставь пустой список [].
+- В options поставь [].
 - В correct укажи один правильный ответ из 1 или 2 слов.
 
 Общие правила:
 - Пиши на русском языке.
 - Каждый вопрос должен быть понятен школьнику.
 - Не выходи за рамки материала.
-- Все значения correct должны точно совпадать с вариантами из options, кроме short_answer.
-- Не используй options как заголовки колонок.
-- Не делай варианты вроде "виды рабов", "обязанности", "термины", "определения".
-- Кнопки должны быть полноценными ответами, которые пользователь может выбрать.
+- Для single_choice, multiple_choice, ordering и find_errors correct должен точно совпадать с options.
+- Для matching_2 и matching_3_4 correct должен быть строкой с парами/связками.
+- Для matching_2 и matching_3_4 НЕ используй кнопки и НЕ заполняй options.
 
 Материал:
 {text}
@@ -175,10 +179,24 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
     if not isinstance(question["correct"], list):
         question["correct"] = [str(question["correct"])]
 
-    question["options"] = [str(option).strip() for option in question["options"] if str(option).strip()]
-    question["correct"] = [str(answer).strip() for answer in question["correct"] if str(answer).strip()]
+    question["options"] = [
+        str(option).strip()
+        for option in question["options"]
+        if str(option).strip()
+    ]
+
+    question["correct"] = [
+        str(answer).strip()
+        for answer in question["correct"]
+        if str(answer).strip()
+    ]
 
     question_type = question["type"]
+
+    if question_type in {"matching_2", "matching_3_4"}:
+        question["options"] = []
+        question["correct"] = question["correct"][:1]
+        return question
 
     if question_type != "short_answer":
         valid_correct = [
@@ -195,7 +213,7 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
         question["options"] = question["options"][:4]
         question["correct"] = question["correct"][:1]
 
-    if question_type in {"multiple_choice", "find_errors", "matching_2", "matching_3_4"}:
+    if question_type in {"multiple_choice", "find_errors"}:
         if len(question["correct"]) == 0 and question["options"]:
             question["correct"] = [question["options"][0]]
 
@@ -245,6 +263,20 @@ def normalize_answer(text: str) -> str:
     return text.strip().lower().replace("ё", "е")
 
 
+def normalize_matching_answer(text: str) -> str:
+    text = normalize_answer(text)
+    text = text.replace("-", "")
+    text = text.replace("—", "")
+    text = text.replace("–", "")
+    text = text.replace(",", " ")
+    text = text.replace(";", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+
+    parts = text.split()
+
+    return " ".join(sorted(parts))
+
+
 def get_user_id_from_message(message: Message) -> int | None:
     return message.from_user.id if message.from_user else None
 
@@ -255,7 +287,7 @@ def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
 
     buttons = []
 
-    if question_type in {"multiple_choice", "find_errors", "matching_2", "matching_3_4"}:
+    if question_type in {"multiple_choice", "find_errors"}:
         for index, option in enumerate(options):
             buttons.append(
                 [
@@ -311,9 +343,14 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
 
     text = f"<b>Вопрос {number} из {len(quiz)}</b>\n\n{question_text}"
 
-    if question_type == "short_answer":
+    if question_type in {"short_answer", "matching_2", "matching_3_4"}:
         session["awaiting_text_answer"] = True
-        text += "\n\nНапишите ответ одним сообщением. Ответ должен состоять из 1-2 слов."
+
+        if question_type == "short_answer":
+            text += "\n\nНапишите ответ одним сообщением. Ответ должен состоять из 1-2 слов."
+        else:
+            text += "\n\nНапишите ответ одним сообщением."
+
         await message_or_callback.answer(text)
         return
 
@@ -487,6 +524,7 @@ async def document_handler(message: Message, bot: Bot) -> None:
 
     elif any(file_name.endswith(ext) for ext in AUDIO_EXTENSIONS):
         await message.answer("Аудиофайл получен. Расшифровываю...")
+
         try:
             text = await transcribe_audio(raw_data, file_name)
         except Exception as error:
@@ -645,13 +683,22 @@ async def text_handler(message: Message) -> None:
         if session.get("awaiting_text_answer"):
             question = session["quiz"][session["current_index"]]
             correct = question.get("correct", [])
+            question_type = question.get("type", "")
 
             user_answer = message.text.strip()
-            normalized_user_answer = normalize_answer(user_answer)
-            normalized_correct = [
-                normalize_answer(str(answer))
-                for answer in correct
-            ]
+
+            if question_type in {"matching_2", "matching_3_4"}:
+                normalized_user_answer = normalize_matching_answer(user_answer)
+                normalized_correct = [
+                    normalize_matching_answer(str(answer))
+                    for answer in correct
+                ]
+            else:
+                normalized_user_answer = normalize_answer(user_answer)
+                normalized_correct = [
+                    normalize_answer(str(answer))
+                    for answer in correct
+                ]
 
             is_correct = normalized_user_answer in normalized_correct
 
