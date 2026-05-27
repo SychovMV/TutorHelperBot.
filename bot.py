@@ -563,12 +563,7 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
     QUIZ_SESSIONS.pop(user_id, None)
 
 
-async def start_quiz_from_text(message: Message, text: str) -> None:
-    user_id = get_user_id_from_message(message)
-
-    if not user_id:
-        return
-
+async def start_quiz_from_text(message: Message, text: str, user_id: int) -> None:
     if len(text) > 14000:
         text = text[:14000]
 
@@ -599,12 +594,7 @@ async def start_quiz_from_text(message: Message, text: str) -> None:
     await send_current_question(message, user_id)
 
 
-async def start_oral_from_text(message: Message, text: str) -> None:
-    user_id = get_user_id_from_message(message)
-
-    if not user_id:
-        return
-
+async def start_oral_from_text(message: Message, text: str, user_id: int) -> None:
     if len(text) > 14000:
         text = text[:14000]
 
@@ -664,6 +654,7 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
     session = ORAL_SESSIONS.get(user_id)
 
     if not session:
+        await message.answer("Сессия вопрос-ответ не найдена. Пришлите файл заново.")
         return
 
     user_answer = message.text.strip()
@@ -736,7 +727,6 @@ async def finish_oral(message: Message, user_id: int) -> None:
         lines.append(f"{mark} Вопрос {index}: {item['score']}/2")
 
     await message.answer("\n".join(lines))
-
     ORAL_SESSIONS.pop(user_id, None)
 
 
@@ -868,7 +858,7 @@ async def mode_test_callback(callback: CallbackQuery) -> None:
         await callback.message.answer("Материал слишком короткий. Пришлите более подробный файл.")
         return
 
-    await start_quiz_from_text(callback.message, text)
+    await start_quiz_from_text(callback.message, text, user_id)
 
 
 @router.callback_query(F.data.startswith("mode_oral:"))
@@ -894,7 +884,7 @@ async def mode_oral_callback(callback: CallbackQuery) -> None:
         await callback.message.answer("Материал слишком короткий. Пришлите более подробный файл.")
         return
 
-    await start_oral_from_text(callback.message, text)
+    await start_oral_from_text(callback.message, text, user_id)
 
 
 @router.callback_query(F.data.startswith("single:"))
