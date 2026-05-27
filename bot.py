@@ -37,25 +37,17 @@ if not OPENAI_API_KEY:
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 router = Router()
-
 QUIZ_SESSIONS: dict[int, dict] = {}
 
 START_TEXT = (
     "Здравствуйте. Я помогу закрепить материал урока. "
-    "Пришлите объяснение нового материала в аудио формате или формате TXT \n\n Пришлите файл в качестве ответа на это сообщение"
+    "Пришлите объяснение нового материала в аудио формате или формате TXT \n\n"
+    "Пришлите файл в качестве ответа на это сообщение"
 )
 
 AUDIO_EXTENSIONS = {
-    ".mp3",
-    ".mp4",
-    ".mpeg",
-    ".mpga",
-    ".m4a",
-    ".wav",
-    ".webm",
-    ".ogg",
-    ".oga",
-    ".flac",
+    ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a",
+    ".wav", ".webm", ".ogg", ".oga", ".flac",
 }
 
 
@@ -79,9 +71,9 @@ async def generate_quiz_json(text: str) -> list[dict]:
 {{
   "number": 6,
   "type": "matching_2",
-  "question": "Соотнесите элементы двух столбцов:\\n\\n<pre>1. Понятие        А. Определение\\n2. Понятие        Б. Определение\\n3. Понятие        В. Определение</pre>\\n\\nВведите ответ в формате: 1а 2б 3в",
+  "question": "Соотнесите элементы двух списков:\\n\\nСписок 1:\\n1. ...\\n2. ...\\n3. ...\\n4. ...\\n\\n    Список 2:\\nА. ...\\nБ. ...\\nВ. ...\\nГ. ...\\n\\nВведите ответ в формате: 1а 2б 3в 4г",
   "options": [],
-  "correct": ["1а 2б 3в"],
+  "correct": ["1а 2б 3в 4г"],
   "explanation": "Короткое объяснение правильных соответствий"
 }}
 
@@ -99,20 +91,24 @@ async def generate_quiz_json(text: str) -> list[dict]:
 6: matching_2 — соотнести варианты из 2 множеств.
 - НЕ делай кнопки.
 - options должен быть пустым списком [].
-- В question обязательно сделай два столбца рядом, желательно через <pre>.
-- Левый столбец обозначай цифрами: 1, 2, 3, 4.
-- Правый столбец обозначай буквами: А, Б, В, Г.
+- НЕ делай таблицу со столбцами рядом.
+- В question сделай списки друг под другом.
+- Первый список обозначай цифрами: 1, 2, 3, 4.
+- Второй список обозначай буквами: А, Б, В, Г.
+- Второй список должен начинаться после абзацного отступа: \\n\\n    Список 2:
 - В конце question напиши: "Введите ответ в формате: 1а 2б 3в 4г".
 - В correct укажи одну строку с правильным соответствием, например: ["1а 2в 3б 4г"].
 
 7: matching_3_4 — соотнести варианты из 3-4 множеств.
 - НЕ делай кнопки.
 - options должен быть пустым списком [].
-- В question сделай таблицу с 3 или 4 столбцами.
-- Первый столбец обозначай цифрами: 1, 2, 3, 4.
-- Второй столбец обозначай буквами: А, Б, В, Г.
-- Третий столбец обозначай римскими цифрами: I, II, III, IV.
-- Если нужен четвёртый столбец, обозначай его маленькими буквами: а, б, в, г.
+- НЕ делай таблицу со столбцами рядом.
+- Все списки должны идти друг под другом.
+- Разные списки разделяй абзацным отступом.
+- Первый список обозначай цифрами: 1, 2, 3, 4.
+- Второй список обозначай буквами: А, Б, В, Г.
+- Третий список обозначай римскими цифрами: I, II, III, IV.
+- Если нужен четвёртый список, обозначай его маленькими буквами: а, б, в, г.
 - В конце question напиши пример формата ответа, например: "1аI 2бII 3вIII 4гIV".
 - В correct укажи одну строку с правильным соответствием.
 
@@ -129,7 +125,13 @@ async def generate_quiz_json(text: str) -> list[dict]:
 
 10: short_answer — вписать правильный ответ самостоятельно.
 - В options поставь [].
-- В correct укажи один правильный ответ из 1 или 2 слов.
+- В correct укажи только один правильный ответ.
+- Правильный ответ ОБЯЗАТЕЛЬНО должен состоять из 1 или 2 слов.
+- Нельзя использовать длинные определения.
+- Нельзя использовать целые предложения.
+- Вопрос должен спрашивать термин, имя, понятие, дату, место или короткое название.
+- Пример хорошего ответа: ["раб"], ["патриции"], ["римское право"].
+- Пример плохого ответа: ["Человек, лишенный прав и свободы, принадлежащий другому человеку"].
 
 Общие правила:
 - Пиши на русском языке.
@@ -138,6 +140,7 @@ async def generate_quiz_json(text: str) -> list[dict]:
 - Для single_choice, multiple_choice, ordering и find_errors correct должен точно совпадать с options.
 - Для matching_2 и matching_3_4 correct должен быть строкой с парами/связками.
 - Для matching_2 и matching_3_4 НЕ используй кнопки и НЕ заполняй options.
+- Для short_answer правильный ответ должен быть строго 1-2 слова.
 
 Материал:
 {text}
@@ -163,6 +166,97 @@ async def generate_quiz_json(text: str) -> list[dict]:
     content = content.replace("```json", "").replace("```", "").strip()
 
     return json.loads(content)
+
+
+def count_words(text: str) -> int:
+    words = re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text)
+    return len(words)
+
+
+async def repair_short_answer_question(question: dict, lesson_text: str) -> dict:
+    repair_prompt = f"""
+Переделай задание short_answer так, чтобы правильный ответ состоял строго из 1 или 2 слов.
+
+Верни ТОЛЬКО JSON-объект без markdown.
+
+Формат:
+{{
+  "number": 10,
+  "type": "short_answer",
+  "question": "Вопрос, который требует ответа 1-2 словами",
+  "options": [],
+  "correct": ["ответ"],
+  "explanation": "Короткое объяснение"
+}}
+
+Требования:
+- correct должен содержать только один ответ.
+- Ответ должен быть строго 1 или 2 слова.
+- Нельзя использовать длинное определение.
+- Нельзя использовать предложение.
+- Вопрос должен спрашивать термин, имя, понятие, дату, место или короткое название.
+- Не выходи за рамки материала.
+
+Старое задание:
+{json.dumps(question, ensure_ascii=False)}
+
+Материал:
+{lesson_text[:6000]}
+"""
+
+    response = await openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {
+                "role": "system",
+                "content": "Ты исправляешь учебное задание в строгом JSON-формате.",
+            },
+            {
+                "role": "user",
+                "content": repair_prompt,
+            },
+        ],
+        temperature=0.2,
+        max_tokens=900,
+    )
+
+    content = response.choices[0].message.content.strip()
+    content = content.replace("```json", "").replace("```", "").strip()
+    return json.loads(content)
+
+
+async def repair_invalid_short_answers(quiz: list[dict], lesson_text: str) -> list[dict]:
+    repaired_quiz = []
+
+    for question in quiz:
+        if not isinstance(question, dict):
+            continue
+
+        if question.get("type") == "short_answer":
+            correct = question.get("correct", [])
+
+            if not isinstance(correct, list):
+                correct = [str(correct)]
+
+            correct = [str(item).strip() for item in correct if str(item).strip()]
+
+            if len(correct) != 1 or count_words(correct[0]) < 1 or count_words(correct[0]) > 2:
+                try:
+                    question = await repair_short_answer_question(question, lesson_text)
+                except Exception:
+                    logging.exception("Short answer repair error")
+                    question = {
+                        "number": question.get("number", 10),
+                        "type": "short_answer",
+                        "question": "Как называется человек, находящийся в собственности другого человека в Древнем Риме?",
+                        "options": [],
+                        "correct": ["раб"],
+                        "explanation": "Раб — это человек, лишённый личной свободы и находящийся в собственности другого человека.",
+                    }
+
+        repaired_quiz.append(question)
+
+    return repaired_quiz
 
 
 def normalize_question(question: dict, fallback_number: int) -> dict:
@@ -225,6 +319,13 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
     if question_type == "short_answer":
         question["options"] = []
         question["correct"] = question["correct"][:1]
+
+        if not question["correct"] or count_words(question["correct"][0]) > 2:
+            question["correct"] = ["ответ"]
+            question["explanation"] = (
+                "Модель вернула слишком длинный ответ. "
+                "Попробуйте отправить материал ещё раз."
+            )
 
     return question
 
@@ -466,6 +567,7 @@ async def start_quiz_from_text(message: Message, text: str) -> None:
 
     try:
         quiz = await generate_quiz_json(text)
+        quiz = await repair_invalid_short_answers(quiz, text)
         quiz = normalize_quiz(quiz)
     except Exception as error:
         logging.exception("Quiz generation error")
