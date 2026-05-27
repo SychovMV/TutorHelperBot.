@@ -105,54 +105,20 @@ async def generate_quiz_json(text: str) -> list[dict]:
 Обязательные типы заданий:
 
 1-3: single_choice — один правильный ответ.
-- В options дай ровно 4 варианта.
-- В correct укажи ровно один вариант, полностью совпадающий с одним из options.
-
 4-5: multiple_choice — несколько правильных ответов.
-- В options дай ровно 5 вариантов.
-- В correct укажи 2 или 3 правильных варианта.
-- Каждый correct должен полностью совпадать с одним из options.
-
 6: matching_2 — соотнести варианты из 2 множеств.
-- НЕ делай кнопки.
-- options должен быть пустым списком [].
-- НЕ делай таблицу со столбцами рядом.
-- В question сделай списки друг под другом.
-- Первый список обозначай цифрами: 1, 2, 3, 4.
-- Второй список обозначай буквами: А, Б, В, Г.
-- Второй список должен начинаться после абзацного отступа: \\n\\n    Список 2:
-- НЕ добавляй в question инструкцию про формат ответа — бот добавит её сам.
-- В correct укажи одну строку с правильным соответствием, например: ["1а 2в 3б 4г"].
-
 7: matching_3_4 — соотнести варианты из 3-4 множеств.
-- НЕ делай кнопки.
-- options должен быть пустым списком [].
-- НЕ делай таблицу со столбцами рядом.
-- Все списки должны идти друг под другом.
-- Разные списки разделяй абзацным отступом.
-- Первый список обозначай цифрами: 1, 2, 3, 4.
-- Второй список обозначай буквами: А, Б, В, Г.
-- Третий список обозначай римскими цифрами: I, II, III, IV.
-- Если нужен четвёртый список, обозначай его маленькими буквами: а, б, в, г.
-- НЕ добавляй в question инструкцию про формат ответа — бот добавит её сам.
-- В correct укажи одну строку с правильным соответствием.
-
-8: ordering — расположить элементы в хронологической или логической последовательности.
-- В question перечисли элементы, которые нужно упорядочить.
-- В options дай 4 готовых варианта последовательности.
-- В correct укажи один правильный вариант из options.
-
+8: ordering — расположить элементы в последовательности.
 9: find_errors — найти фрагменты текста с ошибками.
-- В question напиши короткий текст на 4-6 предложений и инструкцию: "Выберите фрагменты, содержащие ошибки".
-- В options дай 4-5 конкретных фрагментов из текста.
-- В correct укажи только фрагменты с ошибками.
-
 10: short_answer — вписать правильный ответ самостоятельно.
-- В options поставь [].
-- В correct укажи только один правильный ответ.
-- Правильный ответ ОБЯЗАТЕЛЬНО должен состоять из 1 или 2 слов.
-- Нельзя использовать длинные определения.
-- Нельзя использовать целые предложения.
+
+Для matching_2 и matching_3_4:
+- options должен быть [].
+- correct должен быть одной строкой с соответствиями.
+- НЕ добавляй инструкцию про формат ответа, бот добавит её сам.
+
+Для short_answer:
+- correct должен состоять из 1 или 2 слов.
 
 Материал:
 {text}
@@ -177,13 +143,10 @@ async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
     prompt = f"""
 Ты — строгий, но доброжелательный экзаменатор.
 
-Твоя задача — вести с учеником живой устный опрос по материалу урока.
-Вопросы нужно задавать по одному. Следующий вопрос должен зависеть:
-1. от содержания материала;
-2. от предыдущих ответов ученика;
-3. от ошибок, пробелов и сильных сторон ученика.
+Веди с учеником живой устный опрос по материалу урока.
+Следующий вопрос должен зависеть от материала и предыдущих ответов ученика.
 
-Верни ТОЛЬКО JSON-объект без markdown:
+Верни ТОЛЬКО JSON-объект:
 {{
   "question": "Следующий вопрос ученику",
   "reason": "Почему ты задаёшь именно этот вопрос"
@@ -191,15 +154,11 @@ async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
 
 Правила:
 - Задай только один вопрос.
-- Не давай ответ на свой вопрос.
+- Не давай ответ.
 - Не составляй список вопросов заранее.
 - Если ученик ответил слабо, задай более простой или уточняющий вопрос.
 - Если ученик ответил хорошо, задай более глубокий вопрос.
-- Вопрос должен звучать как на устном экзамене.
-- Вопрос должен проверять понимание, а не угадывание.
 - Не задавай вопросы, на которые можно ответить только «да» или «нет».
-- Не выходи за рамки материала урока.
-- Пиши на русском языке.
 
 Материал урока:
 {lesson_text[:12000]}
@@ -227,7 +186,7 @@ async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> 
     prompt = f"""
 Оцени ответ ученика на устный вопрос по материалу урока.
 
-Верни ТОЛЬКО JSON-объект без markdown:
+Верни ТОЛЬКО JSON-объект:
 {{
   "score": 0,
   "feedback": "Развёрнутый комментарий ученику",
@@ -236,17 +195,9 @@ async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> 
 }}
 
 score:
-0 — ответ неверный или почти отсутствует
-1 — ответ частично верный
-2 — ответ верный и достаточно полный
-
-Правила оценки:
-- Сравнивай ответ только с материалом урока.
-- Если ученик уловил часть смысла, поставь 1.
-- Если ученик дал правильный и полный ответ, поставь 2.
-- В feedback объясни, что именно получилось, а что пропущено.
-- В correct_answer дай пример хорошего ответа.
-- В what_to_ask_next укажи, какой аспект стоит проверить дальше.
+0 — неверно
+1 — частично верно
+2 — верно
 
 Материал урока:
 {lesson_text[:12000]}
@@ -261,7 +212,7 @@ score:
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "Ты проверяешь устный ответ ученика по учебному материалу."},
+            {"role": "system", "content": "Ты проверяешь устный ответ ученика."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
@@ -281,7 +232,7 @@ async def repair_short_answer_question(question: dict, lesson_text: str) -> dict
     repair_prompt = f"""
 Переделай задание short_answer так, чтобы правильный ответ состоял строго из 1 или 2 слов.
 
-Верни ТОЛЬКО JSON-объект без markdown.
+Верни ТОЛЬКО JSON-объект.
 
 Формат:
 {{
@@ -303,7 +254,7 @@ async def repair_short_answer_question(question: dict, lesson_text: str) -> dict
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "Ты исправляешь учебное задание в строгом JSON-формате."},
+            {"role": "system", "content": "Ты исправляешь учебное задание в JSON."},
             {"role": "user", "content": repair_prompt},
         ],
         temperature=0.2,
@@ -372,22 +323,23 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
         question["correct"] = question["correct"][:1]
         return question
 
-    if question_type != "short_answer":
-        valid_correct = [answer for answer in question["correct"] if answer in question["options"]]
-        if valid_correct:
-            question["correct"] = valid_correct
-        elif question["options"]:
-            question["correct"] = [question["options"][0]]
+    if question_type == "short_answer":
+        question["options"] = []
+        question["correct"] = question["correct"][:1]
+        return question
+
+    valid_correct = [answer for answer in question["correct"] if answer in question["options"]]
+
+    if valid_correct:
+        question["correct"] = valid_correct
+    elif question["options"]:
+        question["correct"] = [question["options"][0]]
 
     if question_type == "single_choice":
         question["options"] = question["options"][:4]
         question["correct"] = question["correct"][:1]
 
     if question_type == "ordering":
-        question["correct"] = question["correct"][:1]
-
-    if question_type == "short_answer":
-        question["options"] = []
         question["correct"] = question["correct"][:1]
 
     return question
@@ -433,6 +385,46 @@ def normalize_matching_answer(text: str) -> str:
     return " ".join(sorted(text.split()))
 
 
+def answer_result(question_type: str, user_answer, correct: list[str]) -> dict:
+    if question_type in {"multiple_choice", "find_errors"}:
+        user_set = set(user_answer)
+        correct_set = set(correct)
+
+        if user_set == correct_set:
+            return {"status": "correct", "points": 1.0}
+
+        if user_set & correct_set:
+            return {"status": "partial", "points": 0.5}
+
+        return {"status": "wrong", "points": 0.0}
+
+    if question_type in {"matching_2", "matching_3_4"}:
+        user_parts = set(normalize_matching_answer(str(user_answer)).split())
+        correct_parts = set(normalize_matching_answer(str(correct[0] if correct else "")).split())
+
+        if user_parts == correct_parts:
+            return {"status": "correct", "points": 1.0}
+
+        if user_parts & correct_parts:
+            return {"status": "partial", "points": 0.5}
+
+        return {"status": "wrong", "points": 0.0}
+
+    if question_type == "short_answer":
+        normalized_user = normalize_answer(str(user_answer))
+        normalized_correct = [normalize_answer(str(answer)) for answer in correct]
+
+        if normalized_user in normalized_correct:
+            return {"status": "correct", "points": 1.0}
+
+        return {"status": "wrong", "points": 0.0}
+
+    if user_answer in correct:
+        return {"status": "correct", "points": 1.0}
+
+    return {"status": "wrong", "points": 0.0}
+
+
 def get_user_id_from_message(message: Message) -> int | None:
     return message.from_user.id if message.from_user else None
 
@@ -445,6 +437,7 @@ def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
     if question_type in {"multiple_choice", "find_errors"}:
         for index, option in enumerate(options):
             buttons.append([InlineKeyboardButton(text=option[:60], callback_data=f"toggle:{session_id}:{index}")])
+
         buttons.append([InlineKeyboardButton(text="✅ Ответить", callback_data=f"submit:{session_id}")])
     else:
         for index, option in enumerate(options):
@@ -496,7 +489,7 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
     )
 
 
-async def show_answer_and_next(message: Message, user_id: int, user_answer, is_correct: bool) -> None:
+async def show_answer_and_next(message: Message, user_id: int, user_answer, result: dict) -> None:
     session = QUIZ_SESSIONS.get(user_id)
 
     if not session:
@@ -506,7 +499,15 @@ async def show_answer_and_next(message: Message, user_id: int, user_answer, is_c
     correct = question.get("correct", [])
     explanation = question.get("explanation", "")
 
-    result = "✅ Верно!" if is_correct else "❌ Неверно."
+    status = result["status"]
+    points = result["points"]
+
+    if status == "correct":
+        result_text = "✅ Верно!"
+    elif status == "partial":
+        result_text = "🟡 Частично верно."
+    else:
+        result_text = "❌ Неверно."
 
     if isinstance(user_answer, list):
         user_answer_text = "\n".join(user_answer) if user_answer else "Ответ не выбран"
@@ -516,22 +517,22 @@ async def show_answer_and_next(message: Message, user_id: int, user_answer, is_c
     correct_text = "\n".join(correct)
 
     await message.answer(
-        f"{result}\n\n"
+        f"{result_text}\n\n"
         f"<b>Ваш ответ:</b>\n{user_answer_text}\n\n"
         f"<b>Правильный ответ:</b>\n{correct_text}\n\n"
+        f"<b>Баллы за вопрос:</b> {points}/1\n\n"
         f"<b>Объяснение:</b>\n{explanation}"
     )
 
     session["answers"].append(
         {
             "question_number": question.get("number", session["current_index"] + 1),
-            "is_correct": is_correct,
+            "status": status,
+            "points": points,
         }
     )
 
-    if is_correct:
-        session["score"] += 1
-
+    session["score"] += points
     session["current_index"] += 1
     session["awaiting_text_answer"] = False
     session["selected"] = set()
@@ -554,10 +555,17 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
     total = len(session["quiz"])
     percent = round(score / total * 100) if total else 0
 
+    correct_count = sum(1 for item in session["answers"] if item["status"] == "correct")
+    partial_count = sum(1 for item in session["answers"] if item["status"] == "partial")
+    wrong_count = sum(1 for item in session["answers"] if item["status"] == "wrong")
+
     await message_or_callback.answer(
         f"🏁 <b>Тест завершён!</b>\n\n"
-        f"Правильных ответов: <b>{score} из {total}</b>\n"
-        f"Результат: <b>{percent}%</b>"
+        f"Баллы: <b>{score} из {total}</b>\n"
+        f"Результат: <b>{percent}%</b>\n\n"
+        f"✅ Верно: {correct_count}\n"
+        f"🟡 Частично верно: {partial_count}\n"
+        f"❌ Неверно: {wrong_count}"
     )
 
     QUIZ_SESSIONS.pop(user_id, None)
@@ -584,7 +592,7 @@ async def start_quiz_from_text(message: Message, text: str, user_id: int) -> Non
         "session_id": str(uuid4()),
         "quiz": quiz,
         "current_index": 0,
-        "score": 0,
+        "score": 0.0,
         "answers": [],
         "selected": set(),
         "awaiting_text_answer": False,
@@ -901,17 +909,16 @@ async def single_answer_callback(callback: CallbackQuery) -> None:
 
     question = session["quiz"][session["current_index"]]
     options = question.get("options", [])
-    correct = question.get("correct", [])
 
     if option_index >= len(options):
         await callback.answer("Вариант не найден.")
         return
 
     user_answer = options[option_index]
-    is_correct = user_answer in correct
+    result = answer_result(question.get("type", ""), user_answer, question.get("correct", []))
 
     await callback.answer()
-    await show_answer_and_next(callback.message, user_id, user_answer, is_correct)
+    await show_answer_and_next(callback.message, user_id, user_answer, result)
 
 
 @router.callback_query(F.data.startswith("toggle:"))
@@ -948,15 +955,14 @@ async def submit_multiple_callback(callback: CallbackQuery) -> None:
 
     question = session["quiz"][session["current_index"]]
     options = question.get("options", [])
-    correct = question.get("correct", [])
 
     selected_indexes = sorted(session["selected"])
     user_answers = [options[index] for index in selected_indexes if index < len(options)]
 
-    is_correct = set(user_answers) == set(correct)
+    result = answer_result(question.get("type", ""), user_answers, question.get("correct", []))
 
     await callback.answer()
-    await show_answer_and_next(callback.message, user_id, user_answers, is_correct)
+    await show_answer_and_next(callback.message, user_id, user_answers, result)
 
 
 @router.message(F.text)
@@ -972,20 +978,12 @@ async def text_handler(message: Message) -> None:
 
         if session.get("awaiting_text_answer"):
             question = session["quiz"][session["current_index"]]
-            correct = question.get("correct", [])
             question_type = question.get("type", "")
             user_answer = message.text.strip()
 
-            if question_type in {"matching_2", "matching_3_4"}:
-                normalized_user_answer = normalize_matching_answer(user_answer)
-                normalized_correct = [normalize_matching_answer(str(answer)) for answer in correct]
-            else:
-                normalized_user_answer = normalize_answer(user_answer)
-                normalized_correct = [normalize_answer(str(answer)) for answer in correct]
+            result = answer_result(question_type, user_answer, question.get("correct", []))
 
-            is_correct = normalized_user_answer in normalized_correct
-
-            await show_answer_and_next(message, user_id, user_answer, is_correct)
+            await show_answer_and_next(message, user_id, user_answer, result)
             return
 
         await message.answer("Пожалуйста, выберите ответ кнопкой под текущим вопросом.")
