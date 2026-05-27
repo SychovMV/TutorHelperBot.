@@ -30,18 +30,13 @@ if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY не найден")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
 router = Router()
 
+USER_STATES: dict[int, dict] = {}
 QUIZ_SESSIONS: dict[int, dict] = {}
 ORAL_SESSIONS: dict[int, dict] = {}
 USER_LAST_LESSON_TEXT: dict[int, str] = {}
-USER_PENDING_FILES: dict[int, dict] = {}
-
-START_TEXT = (
-    "Здравствуйте. Я помогу закрепить материал урока. "
-    "Пришлите объяснение нового материала в аудио формате или формате TXT \n\n"
-    "Пришлите файл в качестве ответа на это сообщение"
-)
 
 AUDIO_EXTENSIONS = {
     ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a",
@@ -49,11 +44,11 @@ AUDIO_EXTENSIONS = {
 }
 
 
-def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def choose_mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Тест", callback_data=f"mode_test:{user_id}")],
-            [InlineKeyboardButton(text="🎙 Вопрос-ответ", callback_data=f"mode_oral:{user_id}")],
+            [InlineKeyboardButton(text="📝 Тест", callback_data=f"choose_mode:test:{user_id}")],
+            [InlineKeyboardButton(text="🎙 Вопрос-ответ", callback_data=f"choose_mode:oral:{user_id}")],
         ]
     )
 
@@ -67,14 +62,55 @@ def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
-async def get_text_from_pending_file(user_id: int) -> str | None:
-    file_data = USER_PENDING_FILES.get(user_id)
+async def ask_first_question(message: Message) -> None:
+    user_id = message.from_user.id
 
-    if not file_data:
-        return None
+    USER_STATES[user_id] = {"step": "choose_mode"}
+    QUIZ_SESSIONS.pop(user_id, None)
+    ORAL_SESSIONS.pop(user_id, None)
 
-    file_name = file_data["file_name"]
-    raw_data = file_data["raw_data"]
+    await message.answer(
+        "Здравствуйте. Я помогу закрепить материал урока.\n\n"
+        "Что вы хотите сделать?",
+        reply_markup=choose_mode_keyboard(user_id),
+    )
+
+
+@router.message(CommandStart())
+async def start_handler(message: Message) -> None:
+    await ask_first_question(message)
+
+
+@router.callback_query(F.data.startswith("choose_mode:"))
+async def choose_mode_callback(callback: CallbackQuery) -> None:
+    _, mode, callback_user_id = callback.data.split(":")
+    user_id = callback.from_user.id
+
+    if str(user_id) != callback_user_id:
+        await callback.answer("Эта кнопка не для вас.")
+        return
+
+    USER_STATES[user_id] = {
+        "step": "waiting_file",
+        "mode": mode,
+    }
+
+    await callback.answer()
+
+    if mode == "test":
+        await callback.message.answer(
+            "Хорошо, сделаем тест.\n\n"
+            "Теперь пришлите объяснение нового материала в формате TXT или аудио."
+        )
+    else:
+        await callback.message.answer(
+            "Хорошо, проведём режим вопрос-ответ.\n\n"
+            "Теперь пришлите объяснение нового материала в формате TXT или аудио."
+        )
+
+
+async def extract_text_from_file(file_name: str, raw_data: bytes) -> str:
+    file_name = file_name.lower()
 
     if file_name.endswith(".txt"):
         try:
@@ -85,13 +121,114 @@ async def get_text_from_pending_file(user_id: int) -> str | None:
     return await transcribe_audio(raw_data, file_name)
 
 
+@router.message(F.document)
+async def document_handler(message: Message, bot: Bot) -> None:
+    user_id = message.from_user.id
+    state = USER_STATES.get(user_id)
+
+    if not state or state.get("step") != "waiting_file":
+        await ask_first_question(message)
+        return
+
+    document = message.document
+
+    if not document.file_name:
+        await message.answer("Не удалось определить имя файла.")
+        return
+
+    file_name = document.file_name.lower()
+
+    if not file_name.endswith(".txt") and not any(file_name.endswith(ext) for ext in AUDIO_EXTENSIONS):
+        await message.answer("Пришлите файл в формате TXT или аудио.")
+        return
+
+    downloaded_file = await bot.download(document)
+
+    if not isinstance(downloaded_file, io.BytesIO):
+        await message.answer("Не удалось скачать файл.")
+        return
+
+    await process_uploaded_material(message, file_name, downloaded_file.getvalue())
+
+
+@router.message(F.voice)
+async def voice_handler(message: Message, bot: Bot) -> None:
+    user_id = message.from_user.id
+    state = USER_STATES.get(user_id)
+
+    if not state or state.get("step") != "waiting_file":
+        await ask_first_question(message)
+        return
+
+    downloaded_file = await bot.download(message.voice)
+
+    if not isinstance(downloaded_file, io.BytesIO):
+        await message.answer("Не удалось скачать голосовое сообщение.")
+        return
+
+    await process_uploaded_material(message, "voice.ogg", downloaded_file.getvalue())
+
+
+@router.message(F.audio)
+async def audio_handler(message: Message, bot: Bot) -> None:
+    user_id = message.from_user.id
+    state = USER_STATES.get(user_id)
+
+    if not state or state.get("step") != "waiting_file":
+        await ask_first_question(message)
+        return
+
+    downloaded_file = await bot.download(message.audio)
+
+    if not isinstance(downloaded_file, io.BytesIO):
+        await message.answer("Не удалось скачать аудио.")
+        return
+
+    file_name = message.audio.file_name or "audio.mp3"
+    await process_uploaded_material(message, file_name, downloaded_file.getvalue())
+
+
+async def process_uploaded_material(message: Message, file_name: str, raw_data: bytes) -> None:
+    user_id = message.from_user.id
+    state = USER_STATES.get(user_id, {})
+    mode = state.get("mode")
+
+    if mode == "test":
+        await message.answer("Файл получен. Обрабатываю материал и готовлю тест...")
+    else:
+        await message.answer("Файл получен. Обрабатываю материал и готовлю первый вопрос...")
+
+    try:
+        text = await extract_text_from_file(file_name, raw_data)
+    except Exception as error:
+        logging.exception("File processing error")
+        await message.answer(f"Ошибка при обработке файла:\n{error}")
+        return
+
+    if not text or len(text) < 200:
+        await message.answer("Материал слишком короткий. Пришлите более подробный файл.")
+        return
+
+    if len(text) > 14000:
+        text = text[:14000]
+
+    USER_LAST_LESSON_TEXT[user_id] = text
+
+    if mode == "test":
+        await start_quiz_from_text(message, text)
+    elif mode == "oral":
+        await start_oral_from_text(message, text)
+    else:
+        await ask_first_question(message)
+
+
 async def generate_quiz_json(text: str) -> list[dict]:
     prompt = f"""
 Составь 10 интерактивных заданий по материалу урока.
 
-Верни ТОЛЬКО валидный JSON-массив без markdown, без ```json и без пояснений.
+Верни ТОЛЬКО валидный JSON-массив без markdown.
 
-Формат обычного задания:
+Формат:
 {{
   "number": 1,
   "type": "single_choice",
@@ -101,67 +238,30 @@ async def generate_quiz_json(text: str) -> list[dict]:
   "explanation": "Короткое объяснение"
 }}
 
-Формат задания на соотнесение:
-{{
-  "number": 6,
-  "type": "matching_2",
-  "question": "Соотнесите элементы двух списков:\\n\\nСписок 1:\\n1. ...\\n2. ...\\n3. ...\\n4. ...\\n\\n    Список 2:\\nА. ...\\nБ. ...\\nВ. ...\\nГ. ...",
-  "options": [],
-  "correct": ["1а 2б 3в 4г"],
-  "explanation": "Короткое объяснение правильных соответствий"
-}}
+Типы:
+1-3: single_choice.
+4-5: multiple_choice.
+6: matching_2. options = [], correct = ["1а 2б 3в 4г"].
+7: matching_3_4. options = [], correct = ["1аI 2бII 3вIII 4гIV"].
+8: ordering.
+9: find_errors.
+10: short_answer, ответ строго 1-2 слова.
 
-Обязательные типы заданий:
+Для matching_2:
+- списки должны идти друг под другом;
+- первый список: 1, 2, 3, 4;
+- второй список: А, Б, В, Г;
+- второй список начинай с абзацного отступа: \\n\\n    Список 2:
+- инструкцию формата ответа не добавляй, бот добавит её сам.
 
-1-3: single_choice — один правильный ответ.
-- В options дай ровно 4 варианта.
-- В correct укажи ровно один вариант, полностью совпадающий с одним из options.
+Для matching_3_4:
+- списки должны идти друг под другом;
+- разные списки разделяй абзацным отступом;
+- инструкцию формата ответа не добавляй, бот добавит её сам.
 
-4-5: multiple_choice — несколько правильных ответов.
-- В options дай ровно 5 вариантов.
-- В correct укажи 2 или 3 правильных варианта.
-- Каждый correct должен полностью совпадать с одним из options.
-
-6: matching_2 — соотнести варианты из 2 множеств.
-- НЕ делай кнопки.
-- options должен быть пустым списком [].
-- НЕ делай таблицу со столбцами рядом.
-- В question сделай списки друг под другом.
-- Первый список обозначай цифрами: 1, 2, 3, 4.
-- Второй список обозначай буквами: А, Б, В, Г.
-- Второй список должен начинаться после абзацного отступа: \\n\\n    Список 2:
-- НЕ добавляй в question инструкцию про формат ответа — бот добавит её сам.
-- В correct укажи одну строку с правильным соответствием, например: ["1а 2в 3б 4г"].
-
-7: matching_3_4 — соотнести варианты из 3-4 множеств.
-- НЕ делай кнопки.
-- options должен быть пустым списком [].
-- НЕ делай таблицу со столбцами рядом.
-- Все списки должны идти друг под другом.
-- Разные списки разделяй абзацным отступом.
-- Первый список обозначай цифрами: 1, 2, 3, 4.
-- Второй список обозначай буквами: А, Б, В, Г.
-- Третий список обозначай римскими цифрами: I, II, III, IV.
-- Если нужен четвёртый список, обозначай его маленькими буквами: а, б, в, г.
-- НЕ добавляй в question инструкцию про формат ответа — бот добавит её сам.
-- В correct укажи одну строку с правильным соответствием.
-
-8: ordering — расположить элементы в хронологической или логической последовательности.
-- В question перечисли элементы, которые нужно упорядочить.
-- В options дай 4 готовых варианта последовательности.
-- В correct укажи один правильный вариант из options.
-
-9: find_errors — найти фрагменты текста с ошибками.
-- В question напиши короткий текст на 4-6 предложений и инструкцию: "Выберите фрагменты, содержащие ошибки".
-- В options дай 4-5 конкретных фрагментов из текста.
-- В correct укажи только фрагменты с ошибками.
-
-10: short_answer — вписать правильный ответ самостоятельно.
-- В options поставь [].
-- В correct укажи только один правильный ответ.
-- Правильный ответ ОБЯЗАТЕЛЬНО должен состоять из 1 или 2 слов.
-- Нельзя использовать длинные определения.
-- Нельзя использовать целые предложения.
+Для short_answer:
+- correct должен быть 1 или 2 слова;
+- не используй длинные определения.
 
 Материал:
 {text}
@@ -170,7 +270,7 @@ async def generate_quiz_json(text: str) -> list[dict]:
     response = await openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "Ты создаёшь интерактивные учебные задания в строгом JSON-формате."},
+            {"role": "system", "content": "Ты создаёшь учебные задания в строгом JSON-формате."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,
@@ -182,162 +282,8 @@ async def generate_quiz_json(text: str) -> list[dict]:
     return json.loads(content)
 
 
-async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
-    prompt = f"""
-Ты экзаменатор. Проведи устный опрос по материалу урока.
-
-Нужно задать следующий вопрос ученику, учитывая его предыдущие ответы.
-
-Верни ТОЛЬКО JSON-объект:
-{{
-  "question": "Следующий вопрос ученику",
-  "difficulty": "easy|medium|hard"
-}}
-
-Правила:
-- Задавай только один вопрос.
-- Не давай ответ.
-- Если ученик ранее ошибался, задай уточняющий или более простой вопрос.
-- Если отвечал хорошо, задай более глубокий вопрос.
-- Вопрос должен проверять понимание материала.
-
-Материал урока:
-{lesson_text[:12000]}
-
-История ответов:
-{json.dumps(history, ensure_ascii=False)}
-"""
-
-    response = await openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "Ты проводишь устный экзамен по материалу урока."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.5,
-        max_tokens=700,
-    )
-
-    content = response.choices[0].message.content.strip()
-    content = content.replace("```json", "").replace("```", "").strip()
-    return json.loads(content)
-
-
-async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> dict:
-    prompt = f"""
-Оцени ответ ученика на вопрос по материалу урока.
-
-Верни ТОЛЬКО JSON-объект:
-{{
-  "is_correct": true,
-  "score": 0,
-  "feedback": "Короткая обратная связь",
-  "correct_answer": "Краткий правильный ответ"
-}}
-
-score — число от 0 до 2:
-0 — неверно
-1 — частично верно
-2 — верно
-
-Материал урока:
-{lesson_text[:12000]}
-
-Вопрос:
-{question}
-
-Ответ ученика:
-{answer}
-"""
-
-    response = await openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "Ты проверяешь устный ответ ученика."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-        max_tokens=800,
-    )
-
-    content = response.choices[0].message.content.strip()
-    content = content.replace("```json", "").replace("```", "").strip()
-    return json.loads(content)
-
-
 def count_words(text: str) -> int:
     return len(re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text))
-
-
-async def repair_short_answer_question(question: dict, lesson_text: str) -> dict:
-    repair_prompt = f"""
-Переделай задание short_answer так, чтобы правильный ответ состоял строго из 1 или 2 слов.
-
-Верни ТОЛЬКО JSON-объект без markdown.
-
-Формат:
-{{
-  "number": 10,
-  "type": "short_answer",
-  "question": "Вопрос, который требует ответа 1-2 словами",
-  "options": [],
-  "correct": ["ответ"],
-  "explanation": "Короткое объяснение"
-}}
-
-Старое задание:
-{json.dumps(question, ensure_ascii=False)}
-
-Материал:
-{lesson_text[:6000]}
-"""
-
-    response = await openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "Ты исправляешь учебное задание в строгом JSON-формате."},
-            {"role": "user", "content": repair_prompt},
-        ],
-        temperature=0.2,
-        max_tokens=900,
-    )
-
-    content = response.choices[0].message.content.strip()
-    content = content.replace("```json", "").replace("```", "").strip()
-    return json.loads(content)
-
-
-async def repair_invalid_short_answers(quiz: list[dict], lesson_text: str) -> list[dict]:
-    repaired_quiz = []
-
-    for question in quiz:
-        if not isinstance(question, dict):
-            continue
-
-        if question.get("type") == "short_answer":
-            correct = question.get("correct", [])
-
-            if not isinstance(correct, list):
-                correct = [str(correct)]
-
-            correct = [str(item).strip() for item in correct if str(item).strip()]
-
-            if len(correct) != 1 or count_words(correct[0]) < 1 or count_words(correct[0]) > 2:
-                try:
-                    question = await repair_short_answer_question(question, lesson_text)
-                except Exception:
-                    question = {
-                        "number": question.get("number", 10),
-                        "type": "short_answer",
-                        "question": "Как называется человек, находящийся в собственности другого человека?",
-                        "options": [],
-                        "correct": ["раб"],
-                        "explanation": "Раб — это человек, лишённый свободы и находящийся в собственности другого человека.",
-                    }
-
-        repaired_quiz.append(question)
-
-    return repaired_quiz
 
 
 def normalize_question(question: dict, fallback_number: int) -> dict:
@@ -354,33 +300,29 @@ def normalize_question(question: dict, fallback_number: int) -> dict:
     if not isinstance(question["correct"], list):
         question["correct"] = [str(question["correct"])]
 
-    question["options"] = [str(option).strip() for option in question["options"] if str(option).strip()]
-    question["correct"] = [str(answer).strip() for answer in question["correct"] if str(answer).strip()]
+    question["options"] = [str(x).strip() for x in question["options"] if str(x).strip()]
+    question["correct"] = [str(x).strip() for x in question["correct"] if str(x).strip()]
 
-    question_type = question["type"]
-
-    if question_type in {"matching_2", "matching_3_4"}:
+    if question["type"] in {"matching_2", "matching_3_4"}:
         question["options"] = []
         question["correct"] = question["correct"][:1]
         return question
 
-    if question_type != "short_answer":
-        valid_correct = [answer for answer in question["correct"] if answer in question["options"]]
-        if valid_correct:
-            question["correct"] = valid_correct
-        elif question["options"]:
-            question["correct"] = [question["options"][0]]
-
-    if question_type == "single_choice":
-        question["options"] = question["options"][:4]
-        question["correct"] = question["correct"][:1]
-
-    if question_type == "ordering":
-        question["correct"] = question["correct"][:1]
-
-    if question_type == "short_answer":
+    if question["type"] == "short_answer":
         question["options"] = []
         question["correct"] = question["correct"][:1]
+
+        if not question["correct"] or count_words(question["correct"][0]) > 2:
+            question["correct"] = ["ответ"]
+            question["explanation"] = "Модель вернула слишком длинный ответ."
+        return question
+
+    valid_correct = [x for x in question["correct"] if x in question["options"]]
+
+    if valid_correct:
+        question["correct"] = valid_correct
+    elif question["options"]:
+        question["correct"] = [question["options"][0]]
 
     return question
 
@@ -425,10 +367,6 @@ def normalize_matching_answer(text: str) -> str:
     return " ".join(sorted(text.split()))
 
 
-def get_user_id_from_message(message: Message) -> int | None:
-    return message.from_user.id if message.from_user else None
-
-
 def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
     question_type = question.get("type", "")
     options = question.get("options", [])
@@ -443,6 +381,33 @@ def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
             buttons.append([InlineKeyboardButton(text=option[:60], callback_data=f"single:{session_id}:{index}")])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def start_quiz_from_text(message: Message, text: str) -> None:
+    user_id = message.from_user.id
+
+    try:
+        quiz = await generate_quiz_json(text)
+        quiz = normalize_quiz(quiz)
+    except Exception as error:
+        logging.exception("Quiz generation error")
+        await message.answer(f"Ошибка при генерации теста:\n{error}")
+        return
+
+    QUIZ_SESSIONS[user_id] = {
+        "session_id": str(uuid4()),
+        "quiz": quiz,
+        "current_index": 0,
+        "score": 0,
+        "answers": [],
+        "selected": set(),
+        "awaiting_text_answer": False,
+    }
+
+    USER_STATES[user_id] = {"step": "quiz"}
+
+    await message.answer("Тест готов. Начинаем!")
+    await send_current_question(message, user_id)
 
 
 async def send_current_question(message_or_callback, user_id: int) -> None:
@@ -461,12 +426,8 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
     question = quiz[index]
     session["selected"] = set()
 
-    number = question.get("number", index + 1)
-    question_text = question.get("question", "")
     question_type = question.get("type", "")
-    options = question.get("options", [])
-
-    text = f"<b>Вопрос {number} из {len(quiz)}</b>\n\n{question_text}"
+    text = f"<b>Вопрос {index + 1} из {len(quiz)}</b>\n\n{question.get('question', '')}"
 
     if question_type in {"short_answer", "matching_2", "matching_3_4"}:
         session["awaiting_text_answer"] = True
@@ -482,128 +443,132 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
         return
 
     session["awaiting_text_answer"] = False
-
-    await message_or_callback.answer(
-        text,
-        reply_markup=make_keyboard(question, session["session_id"]),
-    )
+    await message_or_callback.answer(text, reply_markup=make_keyboard(question, session["session_id"]))
 
 
 async def show_answer_and_next(message: Message, user_id: int, user_answer, is_correct: bool) -> None:
     session = QUIZ_SESSIONS.get(user_id)
-
-    if not session:
-        return
-
     question = session["quiz"][session["current_index"]]
-    correct = question.get("correct", [])
-    explanation = question.get("explanation", "")
 
     result = "✅ Верно!" if is_correct else "❌ Неверно."
-
-    if isinstance(user_answer, list):
-        user_answer_text = "\n".join(user_answer) if user_answer else "Ответ не выбран"
-    else:
-        user_answer_text = str(user_answer)
-
-    correct_text = "\n".join(correct)
+    correct_text = "\n".join(question.get("correct", []))
 
     await message.answer(
         f"{result}\n\n"
-        f"<b>Ваш ответ:</b>\n{user_answer_text}\n\n"
+        f"<b>Ваш ответ:</b>\n{user_answer}\n\n"
         f"<b>Правильный ответ:</b>\n{correct_text}\n\n"
-        f"<b>Объяснение:</b>\n{explanation}"
+        f"<b>Объяснение:</b>\n{question.get('explanation', '')}"
     )
 
-    session["answers"].append(
-        {
-            "question_number": question.get("number", session["current_index"] + 1),
-            "is_correct": is_correct,
-        }
-    )
+    session["answers"].append({"is_correct": is_correct})
 
     if is_correct:
         session["score"] += 1
 
     session["current_index"] += 1
     session["awaiting_text_answer"] = False
-    session["selected"] = set()
 
     await asyncio.sleep(0.8)
-
-    if session["current_index"] >= len(session["quiz"]):
-        await finish_quiz(message, user_id)
-    else:
-        await send_current_question(message, user_id)
+    await send_current_question(message, user_id)
 
 
 async def finish_quiz(message_or_callback, user_id: int) -> None:
     session = QUIZ_SESSIONS.get(user_id)
 
-    if not session:
-        return
-
     score = session["score"]
     total = len(session["quiz"])
-    percent = round(score / total * 100) if total else 0
+    percent = round(score / total * 100)
 
-    lines = [
-        "🏁 <b>Тест завершён!</b>",
-        "",
-        f"Правильных ответов: <b>{score} из {total}</b>",
-        f"Результат: <b>{percent}%</b>",
-    ]
+    await message_or_callback.answer(
+        f"🏁 <b>Тест завершён!</b>\n\n"
+        f"Правильных ответов: <b>{score} из {total}</b>\n"
+        f"Результат: <b>{percent}%</b>"
+    )
 
-    await message_or_callback.answer("\n".join(lines))
     QUIZ_SESSIONS.pop(user_id, None)
+    USER_STATES[user_id] = {"step": "finished"}
 
 
-async def start_quiz_from_text(message: Message, text: str) -> None:
-    user_id = get_user_id_from_message(message)
+async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
+    prompt = f"""
+Ты экзаменатор. Задай следующий вопрос ученику по материалу урока.
 
-    if not user_id:
-        return
+Верни ТОЛЬКО JSON:
+{{
+  "question": "Вопрос ученику"
+}}
 
-    if len(text) > 14000:
-        text = text[:14000]
+Правила:
+- задай только один вопрос;
+- не давай ответ;
+- если ученик ошибался, задай проще;
+- если отвечал хорошо, задай глубже.
 
-    USER_LAST_LESSON_TEXT[user_id] = text
+Материал:
+{lesson_text[:12000]}
 
-    await message.answer("Готовлю тест...")
+История:
+{json.dumps(history, ensure_ascii=False)}
+"""
 
-    try:
-        quiz = await generate_quiz_json(text)
-        quiz = await repair_invalid_short_answers(quiz, text)
-        quiz = normalize_quiz(quiz)
-    except Exception as error:
-        logging.exception("Quiz generation error")
-        await message.answer(f"Ошибка при генерации заданий:\n{error}")
-        return
+    response = await openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "Ты проводишь устный экзамен."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.5,
+        max_tokens=700,
+    )
 
-    QUIZ_SESSIONS[user_id] = {
-        "session_id": str(uuid4()),
-        "quiz": quiz,
-        "current_index": 0,
-        "score": 0,
-        "answers": [],
-        "selected": set(),
-        "awaiting_text_answer": False,
-    }
+    content = response.choices[0].message.content.strip()
+    content = content.replace("```json", "").replace("```", "").strip()
+    return json.loads(content)
 
-    await message.answer("Тест готов. Начинаем!")
-    await send_current_question(message, user_id)
+
+async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> dict:
+    prompt = f"""
+Оцени ответ ученика.
+
+Верни ТОЛЬКО JSON:
+{{
+  "score": 0,
+  "feedback": "Комментарий",
+  "correct_answer": "Пример правильного ответа"
+}}
+
+score:
+0 — неверно
+1 — частично верно
+2 — верно
+
+Материал:
+{lesson_text[:12000]}
+
+Вопрос:
+{question}
+
+Ответ:
+{answer}
+"""
+
+    response = await openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "Ты проверяешь устный ответ ученика."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=800,
+    )
+
+    content = response.choices[0].message.content.strip()
+    content = content.replace("```json", "").replace("```", "").strip()
+    return json.loads(content)
 
 
 async def start_oral_from_text(message: Message, text: str) -> None:
-    user_id = get_user_id_from_message(message)
-
-    if not user_id:
-        return
-
-    if len(text) > 14000:
-        text = text[:14000]
-
-    USER_LAST_LESSON_TEXT[user_id] = text
+    user_id = message.from_user.id
 
     ORAL_SESSIONS[user_id] = {
         "lesson_text": text,
@@ -613,52 +578,39 @@ async def start_oral_from_text(message: Message, text: str) -> None:
         "score": 0,
     }
 
-    await message.answer("Начинаем режим вопрос-ответ. Я буду задавать вопросы как на устном экзамене.")
+    USER_STATES[user_id] = {"step": "oral"}
 
+    await message.answer("Начинаем режим вопрос-ответ.")
     await send_next_oral_question(message, user_id)
 
 
 async def send_next_oral_question(message: Message, user_id: int) -> None:
     session = ORAL_SESSIONS.get(user_id)
 
-    if not session:
-        return
-
     if session["question_count"] >= 10:
         await finish_oral(message, user_id)
         return
 
-    try:
-        question_data = await generate_oral_question(session["lesson_text"], session["history"])
-    except Exception as error:
-        logging.exception("Oral question generation error")
-        await message.answer(f"Ошибка при генерации вопроса:\n{error}")
-        return
+    data = await generate_oral_question(session["lesson_text"], session["history"])
+    question = data.get("question", "Расскажите главное по теме.")
 
-    question = question_data.get("question", "Расскажите главное по теме.")
     session["current_question"] = question
     session["question_count"] += 1
 
     await message.answer(
-        f"<b>Вопрос {session['question_count']} из 10</b>\n\n{question}\n\nОтветьте одним сообщением."
+        f"<b>Вопрос {session['question_count']} из 10</b>\n\n"
+        f"{question}\n\n"
+        "Ответьте одним сообщением."
     )
 
 
 async def process_oral_answer(message: Message, user_id: int) -> None:
     session = ORAL_SESSIONS.get(user_id)
 
-    if not session:
-        return
-
     answer = message.text.strip()
     question = session["current_question"]
 
-    try:
-        evaluation = await evaluate_oral_answer(session["lesson_text"], question, answer)
-    except Exception as error:
-        logging.exception("Oral evaluation error")
-        await message.answer(f"Ошибка при проверке ответа:\n{error}")
-        return
+    evaluation = await evaluate_oral_answer(session["lesson_text"], question, answer)
 
     score = int(evaluation.get("score", 0))
     feedback = evaluation.get("feedback", "")
@@ -670,8 +622,6 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
             "question": question,
             "answer": answer,
             "score": score,
-            "feedback": feedback,
-            "correct_answer": correct_answer,
         }
     )
 
@@ -688,9 +638,6 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
 async def finish_oral(message: Message, user_id: int) -> None:
     session = ORAL_SESSIONS.get(user_id)
 
-    if not session:
-        return
-
     score = session["score"]
     total = 20
     percent = round(score / total * 100)
@@ -702,165 +649,7 @@ async def finish_oral(message: Message, user_id: int) -> None:
     )
 
     ORAL_SESSIONS.pop(user_id, None)
-
-
-@router.message(CommandStart())
-async def start_handler(message: Message) -> None:
-    user_id = get_user_id_from_message(message)
-
-    if user_id:
-        QUIZ_SESSIONS.pop(user_id, None)
-        ORAL_SESSIONS.pop(user_id, None)
-        USER_PENDING_FILES.pop(user_id, None)
-
-    await message.answer(START_TEXT)
-
-
-@router.message(F.document)
-async def document_handler(message: Message, bot: Bot) -> None:
-    user_id = get_user_id_from_message(message)
-
-    if not user_id:
-        return
-
-    document = message.document
-
-    if not document.file_name:
-        await message.answer("Не удалось определить имя файла.")
-        return
-
-    file_name = document.file_name.lower()
-
-    if not file_name.endswith(".txt") and not any(file_name.endswith(ext) for ext in AUDIO_EXTENSIONS):
-        await message.answer("Пришлите файл в формате TXT или аудио.")
-        return
-
-    downloaded_file = await bot.download(document)
-
-    if not isinstance(downloaded_file, io.BytesIO):
-        await message.answer("Не удалось скачать файл.")
-        return
-
-    USER_PENDING_FILES[user_id] = {
-        "file_name": file_name,
-        "raw_data": downloaded_file.getvalue(),
-    }
-
-    QUIZ_SESSIONS.pop(user_id, None)
-    ORAL_SESSIONS.pop(user_id, None)
-
-    await message.answer(
-        "Файл получен. Выберите режим работы:",
-        reply_markup=mode_keyboard(user_id),
-    )
-
-
-@router.message(F.voice)
-async def voice_handler(message: Message, bot: Bot) -> None:
-    user_id = get_user_id_from_message(message)
-
-    if not user_id:
-        return
-
-    downloaded_file = await bot.download(message.voice)
-
-    if not isinstance(downloaded_file, io.BytesIO):
-        await message.answer("Не удалось скачать голосовое сообщение.")
-        return
-
-    USER_PENDING_FILES[user_id] = {
-        "file_name": "voice.ogg",
-        "raw_data": downloaded_file.getvalue(),
-    }
-
-    QUIZ_SESSIONS.pop(user_id, None)
-    ORAL_SESSIONS.pop(user_id, None)
-
-    await message.answer(
-        "Голосовое сообщение получено. Выберите режим работы:",
-        reply_markup=mode_keyboard(user_id),
-    )
-
-
-@router.message(F.audio)
-async def audio_handler(message: Message, bot: Bot) -> None:
-    user_id = get_user_id_from_message(message)
-
-    if not user_id:
-        return
-
-    downloaded_file = await bot.download(message.audio)
-
-    if not isinstance(downloaded_file, io.BytesIO):
-        await message.answer("Не удалось скачать аудио.")
-        return
-
-    USER_PENDING_FILES[user_id] = {
-        "file_name": message.audio.file_name or "audio.mp3",
-        "raw_data": downloaded_file.getvalue(),
-    }
-
-    QUIZ_SESSIONS.pop(user_id, None)
-    ORAL_SESSIONS.pop(user_id, None)
-
-    await message.answer(
-        "Аудио получено. Выберите режим работы:",
-        reply_markup=mode_keyboard(user_id),
-    )
-
-
-@router.callback_query(F.data.startswith("mode_test:"))
-async def mode_test_callback(callback: CallbackQuery) -> None:
-    _, callback_user_id = callback.data.split(":")
-    user_id = callback.from_user.id
-
-    if str(user_id) != callback_user_id:
-        await callback.answer("Эта кнопка не для вас.")
-        return
-
-    await callback.answer()
-
-    await callback.message.answer("Обрабатываю файл и готовлю тест...")
-
-    try:
-        text = await get_text_from_pending_file(user_id)
-    except Exception as error:
-        logging.exception("File processing error")
-        await callback.message.answer(f"Ошибка при обработке файла:\n{error}")
-        return
-
-    if not text or len(text) < 200:
-        await callback.message.answer("Материал слишком короткий. Пришлите более подробный файл.")
-        return
-
-    await start_quiz_from_text(callback.message, text)
-
-
-@router.callback_query(F.data.startswith("mode_oral:"))
-async def mode_oral_callback(callback: CallbackQuery) -> None:
-    _, callback_user_id = callback.data.split(":")
-    user_id = callback.from_user.id
-
-    if str(user_id) != callback_user_id:
-        await callback.answer("Эта кнопка не для вас.")
-        return
-
-    await callback.answer()
-
-    await callback.message.answer("Обрабатываю файл и готовлю устный опрос...")
-
-    try:
-        text = await get_text_from_pending_file(user_id)
-    except Exception as error:
-        logging.exception("File processing error")
-        await callback.message.answer(f"Ошибка при обработке файла:\n{error}")
-        return
-
-    if not text or len(text) < 200:
-        await callback.message.answer("Материал слишком короткий. Пришлите более подробный файл.")
-        return
-
-    await start_oral_from_text(callback.message, text)
+    USER_STATES[user_id] = {"step": "finished"}
 
 
 @router.callback_query(F.data.startswith("single:"))
@@ -878,10 +667,6 @@ async def single_answer_callback(callback: CallbackQuery) -> None:
     question = session["quiz"][session["current_index"]]
     options = question.get("options", [])
     correct = question.get("correct", [])
-
-    if option_index >= len(options):
-        await callback.answer("Вариант не найден.")
-        return
 
     user_answer = options[option_index]
     is_correct = user_answer in correct
@@ -932,32 +717,33 @@ async def submit_multiple_callback(callback: CallbackQuery) -> None:
     is_correct = set(user_answers) == set(correct)
 
     await callback.answer()
-    await show_answer_and_next(callback.message, user_id, user_answers, is_correct)
+    await show_answer_and_next(callback.message, user_id, "\n".join(user_answers), is_correct)
 
 
 @router.message(F.text)
 async def text_handler(message: Message) -> None:
-    user_id = get_user_id_from_message(message)
+    user_id = message.from_user.id
 
-    if user_id and user_id in ORAL_SESSIONS:
+    if user_id in ORAL_SESSIONS:
         await process_oral_answer(message, user_id)
         return
 
-    if user_id and user_id in QUIZ_SESSIONS:
+    if user_id in QUIZ_SESSIONS:
         session = QUIZ_SESSIONS[user_id]
 
         if session.get("awaiting_text_answer"):
             question = session["quiz"][session["current_index"]]
             correct = question.get("correct", [])
             question_type = question.get("type", "")
+
             user_answer = message.text.strip()
 
             if question_type in {"matching_2", "matching_3_4"}:
                 normalized_user_answer = normalize_matching_answer(user_answer)
-                normalized_correct = [normalize_matching_answer(str(answer)) for answer in correct]
+                normalized_correct = [normalize_matching_answer(str(x)) for x in correct]
             else:
                 normalized_user_answer = normalize_answer(user_answer)
-                normalized_correct = [normalize_answer(str(answer)) for answer in correct]
+                normalized_correct = [normalize_answer(str(x)) for x in correct]
 
             is_correct = normalized_user_answer in normalized_correct
 
@@ -967,7 +753,7 @@ async def text_handler(message: Message) -> None:
         await message.answer("Пожалуйста, выберите ответ кнопкой под текущим вопросом.")
         return
 
-    await message.answer(START_TEXT)
+    await ask_first_question(message)
 
 
 async def start_http_server() -> None:
@@ -978,7 +764,6 @@ async def start_http_server() -> None:
     app.router.add_get("/", health_check)
 
     port = int(os.getenv("PORT", "10000"))
-
     runner = web.AppRunner(app)
     await runner.setup()
 
@@ -1001,9 +786,6 @@ async def start_bot() -> None:
     dp.include_router(router)
 
     await bot.delete_webhook(drop_pending_updates=False)
-
-    webhook_info = await bot.get_webhook_info()
-    logging.info("Webhook info: %s", webhook_info)
 
     logging.info("Telegram polling started")
     await dp.start_polling(bot)
