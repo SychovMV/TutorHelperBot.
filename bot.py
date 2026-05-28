@@ -12,8 +12,15 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from dotenv import load_dotenv
+from mutagen import File as MutagenFile
 from openai import AsyncOpenAI
 
 
@@ -67,10 +74,82 @@ def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
-async def get_text_from_pending_file(user_id: int) -> str | None:
+def is_audio_file(file_name: str) -> bool:
+    return any(file_name.lower().endswith(ext) for ext in AUDIO_EXTENSIONS)
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "не удалось определить"
+
+    total_seconds = int(round(seconds))
+    minutes = total_seconds // 60
+    seconds_left = total_seconds % 60
+
+    if minutes == 0:
+        return f"{seconds_left} сек."
+
+    return f"{minutes} мин. {seconds_left} сек."
+
+
+def get_audio_duration(file_bytes: bytes, file_name: str) -> float | None:
+    _, extension = os.path.splitext(file_name.lower())
+
+    if extension not in AUDIO_EXTENSIONS:
+        extension = ".ogg"
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=extension, delete=True) as temp_audio:
+            temp_audio.write(file_bytes)
+            temp_audio.flush()
+
+            audio = MutagenFile(temp_audio.name)
+
+            if audio and audio.info and hasattr(audio.info, "length"):
+                return float(audio.info.length)
+
+    except Exception:
+        logging.exception("Audio duration detection error")
+
+    return None
+
+
+async def transcribe_audio(file_bytes: bytes, file_name: str) -> str:
+    _, extension = os.path.splitext(file_name.lower())
+
+    if extension not in AUDIO_EXTENSIONS:
+        extension = ".ogg"
+
+    with tempfile.NamedTemporaryFile(suffix=extension, delete=True) as temp_audio:
+        temp_audio.write(file_bytes)
+        temp_audio.flush()
+
+        with open(temp_audio.name, "rb") as audio_file:
+            transcription = await openai_client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=audio_file,
+            )
+
+    return transcription.text.strip()
+
+
+async def send_transcription_file(message: Message, text: str) -> None:
+    file = BufferedInputFile(
+        text.encode("utf-8"),
+        filename="transcription.txt",
+    )
+
+    await message.answer_document(
+        document=file,
+        caption="Готово. Вот TXT-файл с расшифровкой аудио.",
+    )
+
+
+async def get_text_after_mode_choice(message: Message, user_id: int) -> str | None:
     file_data = USER_PENDING_FILES.get(user_id)
 
     if not file_data:
+        await message.answer("Файл не найден. Пришлите файл заново.")
         return None
 
     file_name = file_data["file_name"]
@@ -82,7 +161,20 @@ async def get_text_from_pending_file(user_id: int) -> str | None:
         except UnicodeDecodeError:
             return raw_data.decode("cp1251").strip()
 
-    return await transcribe_audio(raw_data, file_name)
+    if is_audio_file(file_name):
+        duration = get_audio_duration(raw_data, file_name)
+        await message.answer(f"Длительность аудио: {format_duration(duration)}")
+        await message.answer("Расшифровываю аудио...")
+
+        text = await transcribe_audio(raw_data, file_name)
+
+        if text:
+            await send_transcription_file(message, text)
+
+        return text
+
+    await message.answer("Поддерживаются только TXT и аудиофайлы.")
+    return None
 
 
 async def generate_quiz_json(text: str) -> list[dict]:
@@ -451,26 +543,6 @@ def normalize_quiz(quiz: list[dict]) -> list[dict]:
         for index, question in enumerate(quiz[:10], start=1)
         if isinstance(question, dict)
     ]
-
-
-async def transcribe_audio(file_bytes: bytes, file_name: str) -> str:
-    _, extension = os.path.splitext(file_name.lower())
-
-    if extension not in AUDIO_EXTENSIONS:
-        extension = ".ogg"
-
-    with tempfile.NamedTemporaryFile(suffix=extension, delete=True) as temp_audio:
-        temp_audio.write(file_bytes)
-        temp_audio.flush()
-
-        with open(temp_audio.name, "rb") as audio_file:
-            transcription = await openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="ru",
-            )
-
-    return transcription.text.strip()
 
 
 def normalize_answer(text: str) -> str:
@@ -863,7 +935,7 @@ async def start_handler(message: Message) -> None:
     if user_id:
         QUIZ_SESSIONS.pop(user_id, None)
         ORAL_SESSIONS.pop(user_id, None)
-        USER_PENDING_FILES.pop(user_id, None)
+        USER_LAST_LESSON_TEXT.pop(user_id, None)
 
     await message.answer(START_TEXT)
 
@@ -883,7 +955,7 @@ async def document_handler(message: Message, bot: Bot) -> None:
 
     file_name = document.file_name.lower()
 
-    if not file_name.endswith(".txt") and not any(file_name.endswith(ext) for ext in AUDIO_EXTENSIONS):
+    if not file_name.endswith(".txt") and not is_audio_file(file_name):
         await message.answer("Пришлите файл в формате TXT или аудио.")
         return
 
@@ -893,13 +965,14 @@ async def document_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать файл.")
         return
 
+    USER_LAST_LESSON_TEXT.pop(user_id, None)
+    QUIZ_SESSIONS.pop(user_id, None)
+    ORAL_SESSIONS.pop(user_id, None)
+
     USER_PENDING_FILES[user_id] = {
         "file_name": file_name,
         "raw_data": downloaded_file.getvalue(),
     }
-
-    QUIZ_SESSIONS.pop(user_id, None)
-    ORAL_SESSIONS.pop(user_id, None)
 
     await message.answer(
         "Файл получен. Выберите режим работы:",
@@ -920,13 +993,14 @@ async def voice_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать голосовое сообщение.")
         return
 
+    USER_LAST_LESSON_TEXT.pop(user_id, None)
+    QUIZ_SESSIONS.pop(user_id, None)
+    ORAL_SESSIONS.pop(user_id, None)
+
     USER_PENDING_FILES[user_id] = {
         "file_name": "voice.ogg",
         "raw_data": downloaded_file.getvalue(),
     }
-
-    QUIZ_SESSIONS.pop(user_id, None)
-    ORAL_SESSIONS.pop(user_id, None)
 
     await message.answer(
         "Голосовое сообщение получено. Выберите режим работы:",
@@ -947,13 +1021,14 @@ async def audio_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать аудио.")
         return
 
+    USER_LAST_LESSON_TEXT.pop(user_id, None)
+    QUIZ_SESSIONS.pop(user_id, None)
+    ORAL_SESSIONS.pop(user_id, None)
+
     USER_PENDING_FILES[user_id] = {
         "file_name": message.audio.file_name or "audio.mp3",
         "raw_data": downloaded_file.getvalue(),
     }
-
-    QUIZ_SESSIONS.pop(user_id, None)
-    ORAL_SESSIONS.pop(user_id, None)
 
     await message.answer(
         "Аудио получено. Выберите режим работы:",
@@ -997,7 +1072,6 @@ async def new_lesson_callback(callback: CallbackQuery) -> None:
 
     QUIZ_SESSIONS.pop(user_id, None)
     ORAL_SESSIONS.pop(user_id, None)
-    USER_PENDING_FILES.pop(user_id, None)
     USER_LAST_LESSON_TEXT.pop(user_id, None)
 
     await callback.answer()
@@ -1014,10 +1088,10 @@ async def mode_test_callback(callback: CallbackQuery) -> None:
         return
 
     await callback.answer()
-    await callback.message.answer("Обрабатываю файл и готовлю тест...")
+    await callback.message.answer("Обрабатываю файл...")
 
     try:
-        text = await get_text_from_pending_file(user_id)
+        text = await get_text_after_mode_choice(callback.message, user_id)
     except Exception as error:
         logging.exception("File processing error")
         await callback.message.answer(f"Ошибка при обработке файла:\n{error}")
@@ -1040,10 +1114,10 @@ async def mode_oral_callback(callback: CallbackQuery) -> None:
         return
 
     await callback.answer()
-    await callback.message.answer("Обрабатываю файл и начинаю устный опрос...")
+    await callback.message.answer("Обрабатываю файл...")
 
     try:
-        text = await get_text_from_pending_file(user_id)
+        text = await get_text_after_mode_choice(callback.message, user_id)
     except Exception as error:
         logging.exception("File processing error")
         await callback.message.answer(f"Ошибка при обработке файла:\n{error}")
