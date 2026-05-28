@@ -82,7 +82,7 @@ async def generate_quiz_json(text: str) -> list[dict]:
 
 Верни ТОЛЬКО валидный JSON-массив без markdown, без ```json и без пояснений.
 
-Формат обычного задания:
+Формат:
 {{
   "number": 1,
   "type": "single_choice",
@@ -92,33 +92,45 @@ async def generate_quiz_json(text: str) -> list[dict]:
   "explanation": "Короткое объяснение"
 }}
 
-Формат задания на соотнесение:
-{{
-  "number": 6,
-  "type": "matching_2",
-  "question": "Соотнесите элементы двух списков:\\n\\nСписок 1:\\n1. ...\\n2. ...\\n3. ...\\n4. ...\\n\\n    Список 2:\\nА. ...\\nБ. ...\\nВ. ...\\nГ. ...",
-  "options": [],
-  "correct": ["1а 2б 3в 4г"],
-  "explanation": "Короткое объяснение правильных соответствий"
-}}
+Типы заданий:
+1-3: single_choice.
+- options: ровно 4 варианта.
+- correct: ровно 1 вариант, полностью совпадающий с options.
 
-Обязательные типы заданий:
+4-5: multiple_choice.
+- options: ровно 5 вариантов.
+- correct: 2 или 3 варианта, полностью совпадающие с options.
 
-1-3: single_choice — один правильный ответ.
-4-5: multiple_choice — несколько правильных ответов.
-6: matching_2 — соотнести варианты из 2 множеств.
-7: matching_3_4 — соотнести варианты из 3-4 множеств.
-8: ordering — расположить элементы в последовательности.
-9: find_errors — найти фрагменты текста с ошибками.
-10: short_answer — вписать правильный ответ самостоятельно.
+6: matching_2.
+- options: [].
+- correct: одна строка вида ["1а 2в 3б 4г"].
+- В question сделай списки друг под другом.
+- Первый список: 1, 2, 3, 4.
+- Второй список: А, Б, В, Г.
+- Второй список начинай после абзацного отступа: \\n\\n    Список 2:
+- Инструкцию формата ответа не добавляй.
 
-Для matching_2 и matching_3_4:
-- options должен быть [].
-- correct должен быть одной строкой с соответствиями.
-- НЕ добавляй инструкцию про формат ответа, бот добавит её сам.
+7: matching_3_4.
+- options: [].
+- correct: одна строка вида ["1аI 2бII 3вIII 4гIV"].
+- Все списки должны идти друг под другом.
+- Инструкцию формата ответа не добавляй.
 
-Для short_answer:
-- correct должен состоять из 1 или 2 слов.
+8: ordering.
+- ОБЯЗАТЕЛЬНО сделай options.
+- options должен содержать ровно 4 готовых варианта последовательности.
+- Каждый option должен быть полной последовательностью.
+- correct должен содержать ровно 1 вариант, полностью совпадающий с одним из options.
+- НЕЛЬЗЯ оставлять options пустым.
+
+9: find_errors.
+- options должен содержать 4-5 фрагментов текста.
+- correct должен содержать ошибочные фрагменты из options.
+- НЕЛЬЗЯ оставлять options пустым.
+
+10: short_answer.
+- options: [].
+- correct: один ответ из 1-2 слов.
 
 Материал:
 {text}
@@ -132,6 +144,45 @@ async def generate_quiz_json(text: str) -> list[dict]:
         ],
         temperature=0.3,
         max_tokens=3500,
+    )
+
+    content = response.choices[0].message.content.strip()
+    content = content.replace("```json", "").replace("```", "").strip()
+    return json.loads(content)
+
+
+async def repair_button_question(question: dict, lesson_text: str) -> dict:
+    repair_prompt = f"""
+Исправь задание так, чтобы оно подходило для кнопок в Telegram.
+
+Верни ТОЛЬКО JSON-объект без markdown.
+
+Старое задание:
+{json.dumps(question, ensure_ascii=False)}
+
+Требования:
+- type оставь тем же.
+- Для single_choice нужно ровно 4 options и 1 correct.
+- Для multiple_choice нужно ровно 5 options и 2-3 correct.
+- Для ordering нужно ровно 4 options, каждый option — полная последовательность; correct — 1 правильная последовательность из options.
+- Для find_errors нужно 4-5 options; correct — ошибочные фрагменты из options.
+- Все correct должны полностью совпадать с элементами options.
+- options нельзя оставлять пустым.
+- Пиши на русском языке.
+- Не выходи за рамки материала.
+
+Материал:
+{lesson_text[:6000]}
+"""
+
+    response = await openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "Ты исправляешь тестовое задание в строгом JSON-формате."},
+            {"role": "user", "content": repair_prompt},
+        ],
+        temperature=0.2,
+        max_tokens=1200,
     )
 
     content = response.choices[0].message.content.strip()
@@ -266,16 +317,20 @@ async def repair_short_answer_question(question: dict, lesson_text: str) -> dict
     return json.loads(content)
 
 
-async def repair_invalid_short_answers(quiz: list[dict], lesson_text: str) -> list[dict]:
-    repaired_quiz = []
+async def repair_invalid_questions(quiz: list[dict], lesson_text: str) -> list[dict]:
+    repaired = []
+
+    button_types = {"single_choice", "multiple_choice", "ordering", "find_errors"}
 
     for question in quiz:
         if not isinstance(question, dict):
             continue
 
-        if question.get("type") == "short_answer":
-            correct = question.get("correct", [])
+        question_type = question.get("type", "")
+        options = question.get("options", [])
+        correct = question.get("correct", [])
 
+        if question_type == "short_answer":
             if not isinstance(correct, list):
                 correct = [str(correct)]
 
@@ -294,9 +349,45 @@ async def repair_invalid_short_answers(quiz: list[dict], lesson_text: str) -> li
                         "explanation": "Раб — это человек, лишённый свободы и находящийся в собственности другого человека.",
                     }
 
-        repaired_quiz.append(question)
+        elif question_type in button_types:
+            need_repair = False
 
-    return repaired_quiz
+            if not isinstance(options, list) or len(options) == 0:
+                need_repair = True
+
+            if not isinstance(correct, list) or len(correct) == 0:
+                need_repair = True
+
+            if isinstance(options, list) and isinstance(correct, list):
+                for answer in correct:
+                    if answer not in options:
+                        need_repair = True
+
+            if question_type == "ordering" and isinstance(options, list) and len(options) < 2:
+                need_repair = True
+
+            if need_repair:
+                try:
+                    question = await repair_button_question(question, lesson_text)
+                except Exception:
+                    logging.exception("Button question repair error")
+                    question = {
+                        "number": question.get("number", 8),
+                        "type": "single_choice",
+                        "question": "Какое утверждение лучше всего соответствует материалу урока?",
+                        "options": [
+                            "А. Основная мысль изложена в материале урока",
+                            "Б. Это утверждение не связано с материалом",
+                            "В. Это противоположно материалу",
+                            "Г. Это случайный факт",
+                        ],
+                        "correct": ["А. Основная мысль изложена в материале урока"],
+                        "explanation": "Вопрос был автоматически исправлен, потому что модель вернула пустые варианты ответа.",
+                    }
+
+        repaired.append(question)
+
+    return repaired
 
 
 def normalize_question(question: dict, fallback_number: int) -> dict:
@@ -465,6 +556,7 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
     number = question.get("number", index + 1)
     question_text = question.get("question", "")
     question_type = question.get("type", "")
+    options = question.get("options", [])
 
     text = f"<b>Вопрос {number} из {len(quiz)}</b>\n\n{question_text}"
 
@@ -482,6 +574,21 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
         return
 
     session["awaiting_text_answer"] = False
+
+    if not options:
+        await message_or_callback.answer(
+            text + "\n\nУ этого вопроса не были созданы варианты ответа. Перехожу к следующему вопросу."
+        )
+        session["answers"].append(
+            {
+                "question_number": number,
+                "status": "wrong",
+                "points": 0.0,
+            }
+        )
+        session["current_index"] += 1
+        await send_current_question(message_or_callback, user_id)
+        return
 
     await message_or_callback.answer(
         text,
@@ -581,7 +688,7 @@ async def start_quiz_from_text(message: Message, text: str, user_id: int) -> Non
 
     try:
         quiz = await generate_quiz_json(text)
-        quiz = await repair_invalid_short_answers(quiz, text)
+        quiz = await repair_invalid_questions(quiz, text)
         quiz = normalize_quiz(quiz)
     except Exception as error:
         logging.exception("Quiz generation error")
