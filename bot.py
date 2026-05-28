@@ -58,6 +58,15 @@ def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔁 Пройти тест снова", callback_data=f"restart_quiz:{user_id}")],
+            [InlineKeyboardButton(text="📚 Закрепить материал другого урока", callback_data=f"new_lesson:{user_id}")],
+        ]
+    )
+
+
 async def get_text_from_pending_file(user_id: int) -> str | None:
     file_data = USER_PENDING_FILES.get(user_id)
 
@@ -672,7 +681,9 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
         f"Результат: <b>{percent}%</b>\n\n"
         f"✅ Верно: {correct_count}\n"
         f"🟡 Частично верно: {partial_count}\n"
-        f"❌ Неверно: {wrong_count}"
+        f"❌ Неверно: {wrong_count}\n\n"
+        f"Что сделать дальше?",
+        reply_markup=finish_keyboard(user_id),
     )
 
     QUIZ_SESSIONS.pop(user_id, None)
@@ -948,6 +959,49 @@ async def audio_handler(message: Message, bot: Bot) -> None:
         "Аудио получено. Выберите режим работы:",
         reply_markup=mode_keyboard(user_id),
     )
+
+
+@router.callback_query(F.data.startswith("restart_quiz:"))
+async def restart_quiz_callback(callback: CallbackQuery) -> None:
+    _, callback_user_id = callback.data.split(":")
+    user_id = callback.from_user.id
+
+    if str(user_id) != callback_user_id:
+        await callback.answer("Эта кнопка не для вас.")
+        return
+
+    lesson_text = USER_LAST_LESSON_TEXT.get(user_id)
+
+    if not lesson_text:
+        await callback.answer()
+        await callback.message.answer("Не нашёл предыдущий материал. Пришлите файл заново.")
+        return
+
+    QUIZ_SESSIONS.pop(user_id, None)
+    ORAL_SESSIONS.pop(user_id, None)
+
+    await callback.answer()
+    await callback.message.answer("Создаю новый тест по тому же материалу...")
+
+    await start_quiz_from_text(callback.message, lesson_text, user_id)
+
+
+@router.callback_query(F.data.startswith("new_lesson:"))
+async def new_lesson_callback(callback: CallbackQuery) -> None:
+    _, callback_user_id = callback.data.split(":")
+    user_id = callback.from_user.id
+
+    if str(user_id) != callback_user_id:
+        await callback.answer("Эта кнопка не для вас.")
+        return
+
+    QUIZ_SESSIONS.pop(user_id, None)
+    ORAL_SESSIONS.pop(user_id, None)
+    USER_PENDING_FILES.pop(user_id, None)
+    USER_LAST_LESSON_TEXT.pop(user_id, None)
+
+    await callback.answer()
+    await callback.message.answer(START_TEXT)
 
 
 @router.callback_query(F.data.startswith("mode_test:"))
