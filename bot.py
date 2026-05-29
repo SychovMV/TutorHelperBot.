@@ -4,14 +4,16 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import tempfile
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
@@ -30,6 +32,9 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
+ADMIN_CHAT_ID = 275036391
+SQLITE_PATH = os.getenv("SQLITE_PATH", "bot.sqlite3")
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
 
@@ -43,6 +48,7 @@ QUIZ_SESSIONS: dict[int, dict] = {}
 ORAL_SESSIONS: dict[int, dict] = {}
 USER_LAST_LESSON_TEXT: dict[int, str] = {}
 USER_PENDING_FILES: dict[int, dict] = {}
+USER_PENDING_TOKENS: dict[int, int] = {}
 
 START_TEXT = (
     "Здравствуйте. Я помогу закрепить материал урока. "
@@ -54,6 +60,268 @@ AUDIO_EXTENSIONS = {
     ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a",
     ".wav", ".webm", ".ogg", ".oga", ".flac",
 }
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def init_db() -> None:
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id INTEGER PRIMARY KEY,
+                payment_id TEXT DEFAULT '',
+                credits INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'active'
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                direction TEXT NOT NULL,
+                telegram_user_id INTEGER,
+                telegram_chat_id INTEGER,
+                chat_type TEXT,
+                message_id INTEGER,
+                timestamp TEXT,
+                tokens_spent INTEGER DEFAULT 0,
+                status TEXT,
+                text TEXT
+            )
+            """
+        )
+
+        conn.commit()
+
+
+def ensure_user_in_db(telegram_id: int | None) -> None:
+    if telegram_id is None:
+        return
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO users (telegram_id, payment_id, credits, status)
+            VALUES (?, '', 0, 'active')
+            ON CONFLICT(telegram_id) DO NOTHING
+            """,
+            (telegram_id,),
+        )
+        conn.commit()
+
+
+def save_message_log(
+    direction: str,
+    telegram_user_id: int | None,
+    telegram_chat_id: int | None,
+    chat_type: str,
+    message_id: int | None,
+    timestamp: str,
+    tokens_spent: int,
+    status: str,
+    text: str,
+) -> None:
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO message_logs (
+                direction,
+                telegram_user_id,
+                telegram_chat_id,
+                chat_type,
+                message_id,
+                timestamp,
+                tokens_spent,
+                status,
+                text
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                direction,
+                telegram_user_id,
+                telegram_chat_id,
+                chat_type,
+                message_id,
+                timestamp,
+                tokens_spent,
+                status,
+                text[:3000],
+            ),
+        )
+        conn.commit()
+
+
+def add_pending_tokens(user_id: int | None, response) -> None:
+    if user_id is None:
+        return
+
+    usage = getattr(response, "usage", None)
+    total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
+
+    if total_tokens:
+        USER_PENDING_TOKENS[user_id] = USER_PENDING_TOKENS.get(user_id, 0) + int(total_tokens)
+
+
+def take_pending_tokens(chat_id) -> int:
+    try:
+        user_id = int(chat_id)
+    except Exception:
+        return 0
+
+    return USER_PENDING_TOKENS.pop(user_id, 0)
+
+
+def shorten(text: str, limit: int = 2800) -> str:
+    if len(text) <= limit:
+        return text
+
+    return text[:limit] + "\n...\n[сообщение сокращено]"
+
+
+async def send_admin_log(
+    bot: Bot,
+    direction: str,
+    telegram_user_id: int | None,
+    telegram_chat_id: int | None,
+    chat_type: str,
+    message_id: int | None,
+    timestamp: str,
+    tokens_spent: int,
+    status: str,
+    text: str,
+) -> None:
+    save_message_log(
+        direction=direction,
+        telegram_user_id=telegram_user_id,
+        telegram_chat_id=telegram_chat_id,
+        chat_type=chat_type,
+        message_id=message_id,
+        timestamp=timestamp,
+        tokens_spent=tokens_spent,
+        status=status,
+        text=text,
+    )
+
+    report = (
+        f"<b>{direction}</b>\n"
+        f"telegram_user_id: <code>{telegram_user_id}</code>\n"
+        f"telegram_chat_id: <code>{telegram_chat_id}</code>\n"
+        f"chat_type: <code>{chat_type}</code>\n"
+        f"message_id: <code>{message_id}</code>\n"
+        f"timestamp: <code>{timestamp}</code>\n"
+        f"tokens_spent: <code>{tokens_spent}</code>\n"
+        f"status: <code>{status}</code>\n\n"
+        f"<b>text:</b>\n{shorten(text)}"
+    )
+
+    try:
+        await bot.send_message(
+            275036391,
+            report,
+        )
+    except Exception:
+        logging.exception("Admin log send error")
+
+
+async def send_sqlite_to_admin(bot: Bot, caption: str = "SQLite база бота") -> None:
+    if not os.path.exists(SQLITE_PATH):
+        init_db()
+
+    with open(SQLITE_PATH, "rb") as file:
+        db_bytes = file.read()
+
+    document = BufferedInputFile(
+        db_bytes,
+        filename=os.path.basename(SQLITE_PATH),
+    )
+
+    await bot.send_document(
+        ADMIN_CHAT_ID,
+        document=document,
+        caption=caption,
+    )
+
+
+async def daily_sqlite_sender(bot: Bot) -> None:
+    while True:
+        await asyncio.sleep(24 * 60 * 60)
+
+        try:
+            await send_sqlite_to_admin(
+                bot,
+                caption=f"Ежедневная SQLite база бота: {now_iso()}",
+            )
+        except Exception:
+            logging.exception("Daily SQLite send error")
+
+
+class AdminLoggingMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        bot = data.get("bot")
+
+        if isinstance(event, Message):
+            user_id = event.from_user.id if event.from_user else None
+            chat_id = event.chat.id if event.chat else None
+            chat_type = event.chat.type if event.chat else "unknown"
+            message_id = event.message_id
+            timestamp = event.date.isoformat() if event.date else now_iso()
+
+            if user_id != ADMIN_CHAT_ID:
+                ensure_user_in_db(user_id)
+
+                text = event.text or event.caption or ""
+
+                if event.document:
+                    text = text or f"[document] {event.document.file_name}"
+
+                if event.audio:
+                    text = text or f"[audio] {event.audio.file_name or 'audio'}"
+
+                if event.voice:
+                    text = text or "[voice]"
+
+                await send_admin_log(
+                    bot=bot,
+                    direction="user_to_bot",
+                    telegram_user_id=user_id,
+                    telegram_chat_id=chat_id,
+                    chat_type=str(chat_type),
+                    message_id=message_id,
+                    timestamp=timestamp,
+                    tokens_spent=0,
+                    status="received",
+                    text=text,
+                )
+
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id if event.from_user else None
+            chat_id = event.message.chat.id if event.message and event.message.chat else None
+            chat_type = event.message.chat.type if event.message and event.message.chat else "unknown"
+            message_id = event.message.message_id if event.message else None
+
+            if user_id != ADMIN_CHAT_ID:
+                ensure_user_in_db(user_id)
+
+                await send_admin_log(
+                    bot=bot,
+                    direction="user_to_bot_callback",
+                    telegram_user_id=user_id,
+                    telegram_chat_id=chat_id,
+                    chat_type=str(chat_type),
+                    message_id=message_id,
+                    timestamp=now_iso(),
+                    tokens_spent=0,
+                    status="callback_received",
+                    text=event.data or "",
+                )
+
+        return await handler(event, data)
 
 
 def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -177,7 +445,7 @@ async def get_text_after_mode_choice(message: Message, user_id: int) -> str | No
     return None
 
 
-async def generate_quiz_json(text: str) -> list[dict]:
+async def generate_quiz_json(text: str, user_id: int | None = None) -> list[dict]:
     prompt = f"""
 Составь 10 интерактивных заданий по материалу урока.
 
@@ -247,12 +515,14 @@ async def generate_quiz_json(text: str) -> list[dict]:
         max_tokens=3500,
     )
 
+    add_pending_tokens(user_id, response)
+
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
 
 
-async def repair_button_question(question: dict, lesson_text: str) -> dict:
+async def repair_button_question(question: dict, lesson_text: str, user_id: int | None = None) -> dict:
     repair_prompt = f"""
 Исправь задание так, чтобы оно подходило для кнопок в Telegram.
 
@@ -286,12 +556,14 @@ async def repair_button_question(question: dict, lesson_text: str) -> dict:
         max_tokens=1200,
     )
 
+    add_pending_tokens(user_id, response)
+
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
 
 
-async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
+async def generate_oral_question(lesson_text: str, history: list[dict], user_id: int | None = None) -> dict:
     prompt = f"""
 Ты — строгий, но доброжелательный экзаменатор.
 
@@ -329,12 +601,14 @@ async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
         max_tokens=700,
     )
 
+    add_pending_tokens(user_id, response)
+
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
 
 
-async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> dict:
+async def evaluate_oral_answer(lesson_text: str, question: str, answer: str, user_id: int | None = None) -> dict:
     prompt = f"""
 Оцени ответ ученика на устный вопрос по материалу урока.
 
@@ -371,6 +645,8 @@ score:
         max_tokens=900,
     )
 
+    add_pending_tokens(user_id, response)
+
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
@@ -380,7 +656,7 @@ def count_words(text: str) -> int:
     return len(re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text))
 
 
-async def repair_short_answer_question(question: dict, lesson_text: str) -> dict:
+async def repair_short_answer_question(question: dict, lesson_text: str, user_id: int | None = None) -> dict:
     repair_prompt = f"""
 Переделай задание short_answer так, чтобы правильный ответ состоял строго из 1 или 2 слов.
 
@@ -413,12 +689,14 @@ async def repair_short_answer_question(question: dict, lesson_text: str) -> dict
         max_tokens=900,
     )
 
+    add_pending_tokens(user_id, response)
+
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
 
 
-async def repair_invalid_questions(quiz: list[dict], lesson_text: str) -> list[dict]:
+async def repair_invalid_questions(quiz: list[dict], lesson_text: str, user_id: int | None = None) -> list[dict]:
     repaired = []
 
     button_types = {"single_choice", "multiple_choice", "ordering", "find_errors"}
@@ -439,7 +717,7 @@ async def repair_invalid_questions(quiz: list[dict], lesson_text: str) -> list[d
 
             if len(correct) != 1 or count_words(correct[0]) < 1 or count_words(correct[0]) > 2:
                 try:
-                    question = await repair_short_answer_question(question, lesson_text)
+                    question = await repair_short_answer_question(question, lesson_text, user_id)
                 except Exception:
                     question = {
                         "number": question.get("number", 10),
@@ -469,7 +747,7 @@ async def repair_invalid_questions(quiz: list[dict], lesson_text: str) -> list[d
 
             if need_repair:
                 try:
-                    question = await repair_button_question(question, lesson_text)
+                    question = await repair_button_question(question, lesson_text, user_id)
                 except Exception:
                     logging.exception("Button question repair error")
                     question = {
@@ -770,8 +1048,8 @@ async def start_quiz_from_text(message: Message, text: str, user_id: int) -> Non
     await message.answer("Готовлю тест...")
 
     try:
-        quiz = await generate_quiz_json(text)
-        quiz = await repair_invalid_questions(quiz, text)
+        quiz = await generate_quiz_json(text, user_id)
+        quiz = await repair_invalid_questions(quiz, text, user_id)
         quiz = normalize_quiz(quiz)
     except Exception as error:
         logging.exception("Quiz generation error")
@@ -830,6 +1108,7 @@ async def send_next_oral_question(message: Message, user_id: int) -> None:
         question_data = await generate_oral_question(
             lesson_text=session["lesson_text"],
             history=session["history"],
+            user_id=user_id,
         )
     except Exception as error:
         logging.exception("Oral question generation error")
@@ -867,6 +1146,7 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
             lesson_text=session["lesson_text"],
             question=current_question,
             answer=user_answer,
+            user_id=user_id,
         )
     except Exception as error:
         logging.exception("Oral evaluation error")
@@ -933,11 +1213,28 @@ async def start_handler(message: Message) -> None:
     user_id = get_user_id_from_message(message)
 
     if user_id:
+        ensure_user_in_db(user_id)
         QUIZ_SESSIONS.pop(user_id, None)
         ORAL_SESSIONS.pop(user_id, None)
         USER_LAST_LESSON_TEXT.pop(user_id, None)
 
     await message.answer(START_TEXT)
+
+
+@router.message(Command("send_db", "sqlite", "db"))
+async def send_db_handler(message: Message, bot: Bot) -> None:
+    user_id = get_user_id_from_message(message)
+
+    if user_id != ADMIN_CHAT_ID:
+        await message.answer("Эта команда доступна только администратору.")
+        return
+
+    await send_sqlite_to_admin(
+        bot,
+        caption=f"SQLite база по команде администратора: {now_iso()}",
+    )
+
+    await message.answer("SQLite база отправлена.")
 
 
 @router.message(F.document)
@@ -946,6 +1243,8 @@ async def document_handler(message: Message, bot: Bot) -> None:
 
     if not user_id:
         return
+
+    ensure_user_in_db(user_id)
 
     document = message.document
 
@@ -987,6 +1286,8 @@ async def voice_handler(message: Message, bot: Bot) -> None:
     if not user_id:
         return
 
+    ensure_user_in_db(user_id)
+
     downloaded_file = await bot.download(message.voice)
 
     if not isinstance(downloaded_file, io.BytesIO):
@@ -1014,6 +1315,8 @@ async def audio_handler(message: Message, bot: Bot) -> None:
 
     if not user_id:
         return
+
+    ensure_user_in_db(user_id)
 
     downloaded_file = await bot.download(message.audio)
 
@@ -1204,6 +1507,9 @@ async def submit_multiple_callback(callback: CallbackQuery) -> None:
 async def text_handler(message: Message) -> None:
     user_id = get_user_id_from_message(message)
 
+    if user_id:
+        ensure_user_in_db(user_id)
+
     if user_id and user_id in ORAL_SESSIONS:
         await process_oral_answer(message, user_id)
         return
@@ -1248,14 +1554,90 @@ async def start_http_server() -> None:
         await asyncio.sleep(3600)
 
 
+def patch_bot_logging(bot: Bot) -> None:
+    original_send_message = bot.send_message
+    original_send_document = bot.send_document
+
+    async def logged_send_message(*args, **kwargs):
+        if args:
+            chat_id = args[0]
+            text = args[1] if len(args) > 1 else kwargs.get("text", "")
+        else:
+            chat_id = kwargs.get("chat_id")
+            text = kwargs.get("text", "")
+
+        sent_message = await original_send_message(*args, **kwargs)
+
+        try:
+            if int(chat_id) != ADMIN_CHAT_ID:
+                tokens_spent = take_pending_tokens(chat_id)
+
+                await send_admin_log(
+                    bot=bot,
+                    direction="bot_to_user",
+                    telegram_user_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else None,
+                    telegram_chat_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else None,
+                    chat_type=getattr(sent_message.chat, "type", "unknown"),
+                    message_id=sent_message.message_id,
+                    timestamp=now_iso(),
+                    tokens_spent=tokens_spent,
+                    status="sent",
+                    text=str(text),
+                )
+        except Exception:
+            logging.exception("Outgoing message admin log error")
+
+        return sent_message
+
+    async def logged_send_document(*args, **kwargs):
+        if args:
+            chat_id = args[0]
+        else:
+            chat_id = kwargs.get("chat_id")
+
+        caption = kwargs.get("caption", "")
+
+        sent_message = await original_send_document(*args, **kwargs)
+
+        try:
+            if int(chat_id) != ADMIN_CHAT_ID:
+                await send_admin_log(
+                    bot=bot,
+                    direction="bot_to_user_document",
+                    telegram_user_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else None,
+                    telegram_chat_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else None,
+                    chat_type=getattr(sent_message.chat, "type", "unknown"),
+                    message_id=sent_message.message_id,
+                    timestamp=now_iso(),
+                    tokens_spent=take_pending_tokens(chat_id),
+                    status="sent_document",
+                    text=str(caption),
+                )
+        except Exception:
+            logging.exception("Outgoing document admin log error")
+
+        return sent_message
+
+    bot.send_message = logged_send_message
+    bot.send_document = logged_send_document
+
+
 async def start_bot() -> None:
+    init_db()
+
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
+    patch_bot_logging(bot)
+
     dp = Dispatcher()
+    dp.message.middleware(AdminLoggingMiddleware())
+    dp.callback_query.middleware(AdminLoggingMiddleware())
     dp.include_router(router)
+
+    asyncio.create_task(daily_sqlite_sender(bot))
 
     await bot.delete_webhook(drop_pending_updates=False)
 
@@ -1267,6 +1649,8 @@ async def start_bot() -> None:
 
 
 async def main() -> None:
+    init_db()
+
     await asyncio.gather(
         start_http_server(),
         start_bot(),
