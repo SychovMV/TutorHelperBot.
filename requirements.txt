@@ -2,3 +2,4 @@ aiogram
 aiohttp
 python-dotenv
 openai
+mutagen
