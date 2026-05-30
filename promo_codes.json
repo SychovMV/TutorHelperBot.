@@ -1,0 +1,9 @@
+{
+  "promo_codes": [
+    {
+      "code": "FREELESSON",
+      "credits": 1,
+      "active": true
+    }
+  ]
+}
