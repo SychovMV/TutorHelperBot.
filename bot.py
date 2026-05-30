@@ -9,8 +9,8 @@ import tempfile
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from aiohttp import web
-from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
+from aiohttp import ClientSession, web
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
@@ -32,8 +32,14 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-ADMIN_CHAT_ID = 275036391
 SQLITE_PATH = os.getenv("SQLITE_PATH", "bot.sqlite3")
+USED_USERS_URL = os.getenv("USED_USERS_URL", "").strip()
+PROMO_CODES_URL = os.getenv("PROMO_CODES_URL", "").strip()
+PAYMENT_URL = os.getenv("PAYMENT_URL", "https://example.com/pay").strip()
+PAYMENT_CALLBACK_SECRET = os.getenv("PAYMENT_CALLBACK_SECRET", "test-secret").strip()
+
+ADMIN_CHAT_ID = 275036391
+PRICE_USD = 1.99
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
@@ -43,12 +49,12 @@ if not OPENAI_API_KEY:
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 router = Router()
+BOT_INSTANCE: Bot | None = None
 
 QUIZ_SESSIONS: dict[int, dict] = {}
 ORAL_SESSIONS: dict[int, dict] = {}
 USER_LAST_LESSON_TEXT: dict[int, str] = {}
 USER_PENDING_FILES: dict[int, dict] = {}
-USER_PENDING_TOKENS: dict[int, int] = {}
 
 START_TEXT = (
     "Здравствуйте. Я помогу закрепить материал урока. "
@@ -74,24 +80,39 @@ def init_db() -> None:
                 telegram_id INTEGER PRIMARY KEY,
                 payment_id TEXT DEFAULT '',
                 credits INTEGER DEFAULT 0,
-                status TEXT DEFAULT 'active'
+                status TEXT DEFAULT 'active',
+                text_uploads_count INTEGER DEFAULT 0,
+                audio_uploads_count INTEGER DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT
             )
             """
         )
 
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS message_logs (
+            CREATE TABLE IF NOT EXISTS payments (
+                payment_id TEXT PRIMARY KEY,
+                telegram_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT DEFAULT 'USD',
+                status TEXT DEFAULT 'pending',
+                reason TEXT DEFAULT '',
+                created_at TEXT,
+                paid_at TEXT
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_usages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                direction TEXT NOT NULL,
-                telegram_user_id INTEGER,
-                telegram_chat_id INTEGER,
-                chat_type TEXT,
-                message_id INTEGER,
-                timestamp TEXT,
-                tokens_spent INTEGER DEFAULT 0,
-                status TEXT,
-                text TEXT
+                telegram_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                credits INTEGER DEFAULT 1,
+                used_at TEXT,
+                UNIQUE(telegram_id, code)
             )
             """
         )
@@ -99,229 +120,296 @@ def init_db() -> None:
         conn.commit()
 
 
-def ensure_user_in_db(telegram_id: int | None) -> None:
-    if telegram_id is None:
-        return
-
+def ensure_user_in_db(telegram_id: int) -> None:
     with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO users (telegram_id, payment_id, credits, status)
-            VALUES (?, '', 0, 'active')
-            ON CONFLICT(telegram_id) DO NOTHING
+            INSERT INTO users (
+                telegram_id,
+                payment_id,
+                credits,
+                status,
+                text_uploads_count,
+                audio_uploads_count,
+                created_at,
+                updated_at
+            )
+            VALUES (?, '', 0, 'active', 0, 0, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET updated_at = excluded.updated_at
             """,
+            (telegram_id, now_iso(), now_iso()),
+        )
+        conn.commit()
+
+
+def get_user_row(telegram_id: int) -> dict:
+    ensure_user_in_db(telegram_id)
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM users WHERE telegram_id = ?",
             (telegram_id,),
-        )
-        conn.commit()
+        ).fetchone()
+
+    return dict(row)
 
 
-def save_message_log(
-    direction: str,
-    telegram_user_id: int | None,
-    telegram_chat_id: int | None,
-    chat_type: str,
-    message_id: int | None,
-    timestamp: str,
-    tokens_spent: int,
-    status: str,
-    text: str,
-) -> None:
+def get_user_credits(telegram_id: int) -> int:
+    row = get_user_row(telegram_id)
+    return int(row.get("credits", 0))
+
+
+def add_user_credits(telegram_id: int, credits: int) -> None:
+    ensure_user_in_db(telegram_id)
+
     with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO message_logs (
-                direction,
-                telegram_user_id,
-                telegram_chat_id,
-                chat_type,
-                message_id,
-                timestamp,
-                tokens_spent,
-                status,
-                text
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            UPDATE users
+            SET credits = credits + ?, updated_at = ?
+            WHERE telegram_id = ?
             """,
-            (
-                direction,
-                telegram_user_id,
-                telegram_chat_id,
-                chat_type,
-                message_id,
-                timestamp,
-                tokens_spent,
-                status,
-                text[:3000],
-            ),
+            (credits, now_iso(), telegram_id),
         )
         conn.commit()
 
 
-def add_pending_tokens(user_id: int | None, response) -> None:
-    if user_id is None:
-        return
+def spend_user_credit(telegram_id: int) -> bool:
+    ensure_user_in_db(telegram_id)
 
-    usage = getattr(response, "usage", None)
-    total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        row = conn.execute(
+            "SELECT credits FROM users WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
 
-    if total_tokens:
-        USER_PENDING_TOKENS[user_id] = USER_PENDING_TOKENS.get(user_id, 0) + int(total_tokens)
+        credits = int(row[0]) if row else 0
 
+        if credits <= 0:
+            return False
 
-def take_pending_tokens(chat_id) -> int:
-    try:
-        user_id = int(chat_id)
-    except Exception:
-        return 0
-
-    return USER_PENDING_TOKENS.pop(user_id, 0)
-
-
-def shorten(text: str, limit: int = 2800) -> str:
-    if len(text) <= limit:
-        return text
-
-    return text[:limit] + "\n...\n[сообщение сокращено]"
-
-
-async def send_admin_log(
-    bot: Bot,
-    direction: str,
-    telegram_user_id: int | None,
-    telegram_chat_id: int | None,
-    chat_type: str,
-    message_id: int | None,
-    timestamp: str,
-    tokens_spent: int,
-    status: str,
-    text: str,
-) -> None:
-    save_message_log(
-        direction=direction,
-        telegram_user_id=telegram_user_id,
-        telegram_chat_id=telegram_chat_id,
-        chat_type=chat_type,
-        message_id=message_id,
-        timestamp=timestamp,
-        tokens_spent=tokens_spent,
-        status=status,
-        text=text,
-    )
-
-    report = (
-        f"<b>{direction}</b>\n"
-        f"telegram_user_id: <code>{telegram_user_id}</code>\n"
-        f"telegram_chat_id: <code>{telegram_chat_id}</code>\n"
-        f"chat_type: <code>{chat_type}</code>\n"
-        f"message_id: <code>{message_id}</code>\n"
-        f"timestamp: <code>{timestamp}</code>\n"
-        f"tokens_spent: <code>{tokens_spent}</code>\n"
-        f"status: <code>{status}</code>\n\n"
-        f"<b>text:</b>\n{shorten(text)}"
-    )
-
-    try:
-        await bot.send_message(
-            275036391,
-            report,
+        conn.execute(
+            """
+            UPDATE users
+            SET credits = credits - 1, updated_at = ?
+            WHERE telegram_id = ?
+            """,
+            (now_iso(), telegram_id),
         )
+        conn.commit()
+
+    return True
+
+
+def mark_user_used(telegram_id: int, file_kind: str) -> None:
+    ensure_user_in_db(telegram_id)
+
+    if file_kind == "audio":
+        field = "audio_uploads_count"
+    else:
+        field = "text_uploads_count"
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            f"""
+            UPDATE users
+            SET {field} = {field} + 1,
+                status = 'used',
+                updated_at = ?
+            WHERE telegram_id = ?
+            """,
+            (now_iso(), telegram_id),
+        )
+        conn.commit()
+
+
+def local_user_has_used_bot(telegram_id: int) -> bool:
+    row = get_user_row(telegram_id)
+
+    return (
+        int(row.get("text_uploads_count", 0)) > 0
+        or int(row.get("audio_uploads_count", 0)) > 0
+        or row.get("status") in {"used", "paid", "promo"}
+    )
+
+
+async def fetch_json_from_url(url: str) -> dict:
+    if not url:
+        return {}
+
+    async with ClientSession() as session:
+        async with session.get(url, timeout=15) as response:
+            if response.status != 200:
+                logging.warning("GitHub JSON fetch failed: %s %s", response.status, url)
+                return {}
+
+            return await response.json()
+
+
+async def github_user_has_used_bot(telegram_id: int) -> bool:
+    data = await fetch_json_from_url(USED_USERS_URL)
+    used_users = data.get("used_users", [])
+
+    try:
+        used_users = [int(item) for item in used_users]
     except Exception:
-        logging.exception("Admin log send error")
+        used_users = []
+
+    return telegram_id in used_users
 
 
-async def send_sqlite_to_admin(bot: Bot, caption: str = "SQLite база бота") -> None:
-    if not os.path.exists(SQLITE_PATH):
-        init_db()
+async def user_has_used_bot_anywhere(telegram_id: int) -> bool:
+    if local_user_has_used_bot(telegram_id):
+        return True
 
-    with open(SQLITE_PATH, "rb") as file:
-        db_bytes = file.read()
-
-    document = BufferedInputFile(
-        db_bytes,
-        filename=os.path.basename(SQLITE_PATH),
-    )
-
-    await bot.send_document(
-        ADMIN_CHAT_ID,
-        document=document,
-        caption=caption,
-    )
+    return await github_user_has_used_bot(telegram_id)
 
 
-async def daily_sqlite_sender(bot: Bot) -> None:
-    while True:
-        await asyncio.sleep(24 * 60 * 60)
+async def get_promo_codes() -> list[dict]:
+    data = await fetch_json_from_url(PROMO_CODES_URL)
+    promo_codes = data.get("promo_codes", [])
 
-        try:
-            await send_sqlite_to_admin(
-                bot,
-                caption=f"Ежедневная SQLite база бота: {now_iso()}",
+    if not isinstance(promo_codes, list):
+        return []
+
+    return promo_codes
+
+
+async def apply_promo_code(telegram_id: int, code: str) -> tuple[bool, str]:
+    code = code.strip().upper()
+
+    if not code:
+        return False, "Промокод пустой."
+
+    promo_codes = await get_promo_codes()
+
+    found = None
+
+    for item in promo_codes:
+        item_code = str(item.get("code", "")).strip().upper()
+        active = bool(item.get("active", False))
+
+        if item_code == code and active:
+            found = item
+            break
+
+    if not found:
+        return False, "Промокод не найден или уже не активен."
+
+    credits = int(found.get("credits", 1))
+
+    try:
+        with sqlite3.connect(SQLITE_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO promo_usages (telegram_id, code, credits, used_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (telegram_id, code, credits, now_iso()),
             )
-        except Exception:
-            logging.exception("Daily SQLite send error")
+            conn.commit()
+
+    except sqlite3.IntegrityError:
+        return False, "Вы уже использовали этот промокод."
+
+    add_user_credits(telegram_id, credits)
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET status = 'promo', updated_at = ?
+            WHERE telegram_id = ?
+            """,
+            (now_iso(), telegram_id),
+        )
+        conn.commit()
+
+    return True, f"Промокод принят. Начислено кредитов: {credits}."
 
 
-class AdminLoggingMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        bot = data.get("bot")
+def create_payment(telegram_id: int, reason: str) -> str:
+    payment_id = str(uuid4())
 
-        if isinstance(event, Message):
-            user_id = event.from_user.id if event.from_user else None
-            chat_id = event.chat.id if event.chat else None
-            chat_type = event.chat.type if event.chat else "unknown"
-            message_id = event.message_id
-            timestamp = event.date.isoformat() if event.date else now_iso()
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO payments (
+                payment_id,
+                telegram_id,
+                amount,
+                currency,
+                status,
+                reason,
+                created_at,
+                paid_at
+            )
+            VALUES (?, ?, ?, 'USD', 'pending', ?, ?, '')
+            """,
+            (payment_id, telegram_id, PRICE_USD, reason, now_iso()),
+        )
 
-            if user_id != ADMIN_CHAT_ID:
-                ensure_user_in_db(user_id)
+        conn.execute(
+            """
+            UPDATE users
+            SET payment_id = ?, updated_at = ?
+            WHERE telegram_id = ?
+            """,
+            (payment_id, now_iso(), telegram_id),
+        )
 
-                text = event.text or event.caption or ""
+        conn.commit()
 
-                if event.document:
-                    text = text or f"[document] {event.document.file_name}"
+    return payment_id
 
-                if event.audio:
-                    text = text or f"[audio] {event.audio.file_name or 'audio'}"
 
-                if event.voice:
-                    text = text or "[voice]"
+def mark_payment_paid(payment_id: str) -> int | None:
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.row_factory = sqlite3.Row
 
-                await send_admin_log(
-                    bot=bot,
-                    direction="user_to_bot",
-                    telegram_user_id=user_id,
-                    telegram_chat_id=chat_id,
-                    chat_type=str(chat_type),
-                    message_id=message_id,
-                    timestamp=timestamp,
-                    tokens_spent=0,
-                    status="received",
-                    text=text,
-                )
+        row = conn.execute(
+            "SELECT * FROM payments WHERE payment_id = ?",
+            (payment_id,),
+        ).fetchone()
 
-        elif isinstance(event, CallbackQuery):
-            user_id = event.from_user.id if event.from_user else None
-            chat_id = event.message.chat.id if event.message and event.message.chat else None
-            chat_type = event.message.chat.type if event.message and event.message.chat else "unknown"
-            message_id = event.message.message_id if event.message else None
+        if not row:
+            return None
 
-            if user_id != ADMIN_CHAT_ID:
-                ensure_user_in_db(user_id)
+        telegram_id = int(row["telegram_id"])
 
-                await send_admin_log(
-                    bot=bot,
-                    direction="user_to_bot_callback",
-                    telegram_user_id=user_id,
-                    telegram_chat_id=chat_id,
-                    chat_type=str(chat_type),
-                    message_id=message_id,
-                    timestamp=now_iso(),
-                    tokens_spent=0,
-                    status="callback_received",
-                    text=event.data or "",
-                )
+        conn.execute(
+            """
+            UPDATE payments
+            SET status = 'paid', paid_at = ?
+            WHERE payment_id = ?
+            """,
+            (now_iso(), payment_id),
+        )
 
-        return await handler(event, data)
+        conn.execute(
+            """
+            UPDATE users
+            SET status = 'paid', updated_at = ?
+            WHERE telegram_id = ?
+            """,
+            (now_iso(), telegram_id),
+        )
+
+        conn.commit()
+
+    return telegram_id
+
+
+def payment_keyboard(payment_id: str, user_id: int) -> InlineKeyboardMarkup:
+    pay_link = f"{PAYMENT_URL}?payment_id={payment_id}&amount={PRICE_USD}"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить 1,99 $", url=pay_link)],
+            [InlineKeyboardButton(text="✅ Заглушка: оплата произведена", callback_data=f"fake_paid:{payment_id}:{user_id}")],
+        ]
+    )
 
 
 def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -344,6 +432,69 @@ def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 def is_audio_file(file_name: str) -> bool:
     return any(file_name.lower().endswith(ext) for ext in AUDIO_EXTENSIONS)
+
+
+def get_file_kind(file_name: str) -> str:
+    if file_name.lower().endswith(".txt"):
+        return "text"
+
+    return "audio"
+
+
+async def check_payment_gate(message: Message, user_id: int, file_kind: str) -> bool:
+    ensure_user_in_db(user_id)
+
+    if file_kind == "audio":
+        requires_payment = True
+        reason = "audio_upload"
+    else:
+        already_used = await user_has_used_bot_anywhere(user_id)
+        requires_payment = already_used
+        reason = "second_text_upload"
+
+    if not requires_payment:
+        mark_user_used(user_id, file_kind)
+        await message.answer(
+            "Файл принят. Выберите режим работы:",
+            reply_markup=mode_keyboard(user_id),
+        )
+        return True
+
+    if spend_user_credit(user_id):
+        mark_user_used(user_id, file_kind)
+        await message.answer(
+            "Использован 1 кредит. Выберите режим работы:",
+            reply_markup=mode_keyboard(user_id),
+        )
+        return True
+
+    payment_id = create_payment(user_id, reason)
+
+    await message.answer(
+        f"Для продолжения нужно оплатить <b>{PRICE_USD} $</b>.\n\n"
+        f"Также можно ввести промокод командой:\n"
+        f"<code>/promo ВАШ_ПРОМОКОД</code>\n\n"
+        f"payment_id:\n<code>{payment_id}</code>",
+        reply_markup=payment_keyboard(payment_id, user_id),
+    )
+
+    return False
+
+
+async def unlock_after_payment(message: Message, user_id: int) -> None:
+    file_data = USER_PENDING_FILES.get(user_id)
+
+    if not file_data:
+        await message.answer("Оплата получена, но файл не найден. Пришлите файл заново.")
+        return
+
+    file_kind = file_data.get("file_kind", "text")
+    mark_user_used(user_id, file_kind)
+
+    await message.answer(
+        "Оплата подтверждена. Выберите режим работы:",
+        reply_markup=mode_keyboard(user_id),
+    )
 
 
 def format_duration(seconds: float | None) -> str:
@@ -445,7 +596,7 @@ async def get_text_after_mode_choice(message: Message, user_id: int) -> str | No
     return None
 
 
-async def generate_quiz_json(text: str, user_id: int | None = None) -> list[dict]:
+async def generate_quiz_json(text: str) -> list[dict]:
     prompt = f"""
 Составь 10 интерактивных заданий по материалу урока.
 
@@ -463,43 +614,16 @@ async def generate_quiz_json(text: str, user_id: int | None = None) -> list[dict
 
 Типы заданий:
 1-3: single_choice.
-- options: ровно 4 варианта.
-- correct: ровно 1 вариант, полностью совпадающий с options.
-
 4-5: multiple_choice.
-- options: ровно 5 вариантов.
-- correct: 2 или 3 варианта, полностью совпадающие с options.
-
 6: matching_2.
-- options: [].
-- correct: одна строка вида ["1а 2в 3б 4г"].
-- В question сделай списки друг под другом.
-- Первый список: 1, 2, 3, 4.
-- Второй список: А, Б, В, Г.
-- Второй список начинай после абзацного отступа: \\n\\n    Список 2:
-- Инструкцию формата ответа не добавляй.
-
 7: matching_3_4.
-- options: [].
-- correct: одна строка вида ["1аI 2бII 3вIII 4гIV"].
-- Все списки должны идти друг под другом.
-- Инструкцию формата ответа не добавляй.
-
 8: ordering.
-- ОБЯЗАТЕЛЬНО сделай options.
-- options должен содержать ровно 4 готовых варианта последовательности.
-- Каждый option должен быть полной последовательностью.
-- correct должен содержать ровно 1 вариант, полностью совпадающий с одним из options.
-- НЕЛЬЗЯ оставлять options пустым.
-
 9: find_errors.
-- options должен содержать 4-5 фрагментов текста.
-- correct должен содержать ошибочные фрагменты из options.
-- НЕЛЬЗЯ оставлять options пустым.
-
 10: short_answer.
-- options: [].
-- correct: один ответ из 1-2 слов.
+
+Для ordering и find_errors обязательно сделай options.
+Для matching_2 и matching_3_4 options должен быть [].
+Для short_answer correct должен состоять из 1 или 2 слов.
 
 Материал:
 {text}
@@ -515,14 +639,12 @@ async def generate_quiz_json(text: str, user_id: int | None = None) -> list[dict
         max_tokens=3500,
     )
 
-    add_pending_tokens(user_id, response)
-
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
 
 
-async def repair_button_question(question: dict, lesson_text: str, user_id: int | None = None) -> dict:
+async def repair_button_question(question: dict, lesson_text: str) -> dict:
     repair_prompt = f"""
 Исправь задание так, чтобы оно подходило для кнопок в Telegram.
 
@@ -535,12 +657,10 @@ async def repair_button_question(question: dict, lesson_text: str, user_id: int 
 - type оставь тем же.
 - Для single_choice нужно ровно 4 options и 1 correct.
 - Для multiple_choice нужно ровно 5 options и 2-3 correct.
-- Для ordering нужно ровно 4 options, каждый option — полная последовательность; correct — 1 правильная последовательность из options.
-- Для find_errors нужно 4-5 options; correct — ошибочные фрагменты из options.
+- Для ordering нужно ровно 4 options, каждый option — полная последовательность.
+- Для find_errors нужно 4-5 options.
 - Все correct должны полностью совпадать с элементами options.
 - options нельзя оставлять пустым.
-- Пиши на русском языке.
-- Не выходи за рамки материала.
 
 Материал:
 {lesson_text[:6000]}
@@ -556,14 +676,12 @@ async def repair_button_question(question: dict, lesson_text: str, user_id: int 
         max_tokens=1200,
     )
 
-    add_pending_tokens(user_id, response)
-
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
 
 
-async def generate_oral_question(lesson_text: str, history: list[dict], user_id: int | None = None) -> dict:
+async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
     prompt = f"""
 Ты — строгий, но доброжелательный экзаменатор.
 
@@ -580,8 +698,6 @@ async def generate_oral_question(lesson_text: str, history: list[dict], user_id:
 - Задай только один вопрос.
 - Не давай ответ.
 - Не составляй список вопросов заранее.
-- Если ученик ответил слабо, задай более простой или уточняющий вопрос.
-- Если ученик ответил хорошо, задай более глубокий вопрос.
 - Не задавай вопросы, на которые можно ответить только «да» или «нет».
 
 Материал урока:
@@ -601,14 +717,12 @@ async def generate_oral_question(lesson_text: str, history: list[dict], user_id:
         max_tokens=700,
     )
 
-    add_pending_tokens(user_id, response)
-
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
 
 
-async def evaluate_oral_answer(lesson_text: str, question: str, answer: str, user_id: int | None = None) -> dict:
+async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> dict:
     prompt = f"""
 Оцени ответ ученика на устный вопрос по материалу урока.
 
@@ -645,8 +759,6 @@ score:
         max_tokens=900,
     )
 
-    add_pending_tokens(user_id, response)
-
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
@@ -656,21 +768,11 @@ def count_words(text: str) -> int:
     return len(re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text))
 
 
-async def repair_short_answer_question(question: dict, lesson_text: str, user_id: int | None = None) -> dict:
+async def repair_short_answer_question(question: dict, lesson_text: str) -> dict:
     repair_prompt = f"""
 Переделай задание short_answer так, чтобы правильный ответ состоял строго из 1 или 2 слов.
 
 Верни ТОЛЬКО JSON-объект.
-
-Формат:
-{{
-  "number": 10,
-  "type": "short_answer",
-  "question": "Вопрос, который требует ответа 1-2 словами",
-  "options": [],
-  "correct": ["ответ"],
-  "explanation": "Короткое объяснение"
-}}
 
 Старое задание:
 {json.dumps(question, ensure_ascii=False)}
@@ -689,16 +791,13 @@ async def repair_short_answer_question(question: dict, lesson_text: str, user_id
         max_tokens=900,
     )
 
-    add_pending_tokens(user_id, response)
-
     content = response.choices[0].message.content.strip()
     content = content.replace("```json", "").replace("```", "").strip()
     return json.loads(content)
 
 
-async def repair_invalid_questions(quiz: list[dict], lesson_text: str, user_id: int | None = None) -> list[dict]:
+async def repair_invalid_questions(quiz: list[dict], lesson_text: str) -> list[dict]:
     repaired = []
-
     button_types = {"single_choice", "multiple_choice", "ordering", "find_errors"}
 
     for question in quiz:
@@ -717,7 +816,7 @@ async def repair_invalid_questions(quiz: list[dict], lesson_text: str, user_id: 
 
             if len(correct) != 1 or count_words(correct[0]) < 1 or count_words(correct[0]) > 2:
                 try:
-                    question = await repair_short_answer_question(question, lesson_text, user_id)
+                    question = await repair_short_answer_question(question, lesson_text)
                 except Exception:
                     question = {
                         "number": question.get("number", 10),
@@ -742,14 +841,10 @@ async def repair_invalid_questions(quiz: list[dict], lesson_text: str, user_id: 
                     if answer not in options:
                         need_repair = True
 
-            if question_type == "ordering" and isinstance(options, list) and len(options) < 2:
-                need_repair = True
-
             if need_repair:
                 try:
-                    question = await repair_button_question(question, lesson_text, user_id)
+                    question = await repair_button_question(question, lesson_text)
                 except Exception:
-                    logging.exception("Button question repair error")
                     question = {
                         "number": question.get("number", 8),
                         "type": "single_choice",
@@ -761,7 +856,7 @@ async def repair_invalid_questions(quiz: list[dict], lesson_text: str, user_id: 
                             "Г. Это случайный факт",
                         ],
                         "correct": ["А. Основная мысль изложена в материале урока"],
-                        "explanation": "Вопрос был автоматически исправлен, потому что модель вернула пустые варианты ответа.",
+                        "explanation": "Вопрос был автоматически исправлен.",
                     }
 
         repaired.append(question)
@@ -1048,8 +1143,8 @@ async def start_quiz_from_text(message: Message, text: str, user_id: int) -> Non
     await message.answer("Готовлю тест...")
 
     try:
-        quiz = await generate_quiz_json(text, user_id)
-        quiz = await repair_invalid_questions(quiz, text, user_id)
+        quiz = await generate_quiz_json(text)
+        quiz = await repair_invalid_questions(quiz, text)
         quiz = normalize_quiz(quiz)
     except Exception as error:
         logging.exception("Quiz generation error")
@@ -1108,7 +1203,6 @@ async def send_next_oral_question(message: Message, user_id: int) -> None:
         question_data = await generate_oral_question(
             lesson_text=session["lesson_text"],
             history=session["history"],
-            user_id=user_id,
         )
     except Exception as error:
         logging.exception("Oral question generation error")
@@ -1146,7 +1240,6 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
             lesson_text=session["lesson_text"],
             question=current_question,
             answer=user_answer,
-            user_id=user_id,
         )
     except Exception as error:
         logging.exception("Oral evaluation error")
@@ -1221,20 +1314,55 @@ async def start_handler(message: Message) -> None:
     await message.answer(START_TEXT)
 
 
-@router.message(Command("send_db", "sqlite", "db"))
-async def send_db_handler(message: Message, bot: Bot) -> None:
+@router.message(Command("promo"))
+async def promo_handler(message: Message) -> None:
+    user_id = get_user_id_from_message(message)
+
+    if not user_id:
+        return
+
+    parts = message.text.split(maxsplit=1)
+
+    if len(parts) < 2:
+        await message.answer("Введите промокод так:\n<code>/promo FREELESSON</code>")
+        return
+
+    ok, result_text = await apply_promo_code(user_id, parts[1])
+    await message.answer(result_text)
+
+    if ok and user_id in USER_PENDING_FILES:
+        if spend_user_credit(user_id):
+            await unlock_after_payment(message, user_id)
+
+
+@router.message(Command("confirm_payment"))
+async def confirm_payment_handler(message: Message) -> None:
     user_id = get_user_id_from_message(message)
 
     if user_id != ADMIN_CHAT_ID:
         await message.answer("Эта команда доступна только администратору.")
         return
 
-    await send_sqlite_to_admin(
-        bot,
-        caption=f"SQLite база по команде администратора: {now_iso()}",
-    )
+    parts = message.text.split(maxsplit=1)
 
-    await message.answer("SQLite база отправлена.")
+    if len(parts) < 2:
+        await message.answer("Формат:\n<code>/confirm_payment payment_id</code>")
+        return
+
+    payment_id = parts[1].strip()
+    paid_user_id = mark_payment_paid(payment_id)
+
+    if not paid_user_id:
+        await message.answer("payment_id не найден.")
+        return
+
+    await message.answer(f"Оплата подтверждена для пользователя {paid_user_id}.")
+
+    if BOT_INSTANCE:
+        await BOT_INSTANCE.send_message(
+            paid_user_id,
+            "Оплата подтверждена.",
+        )
 
 
 @router.message(F.document)
@@ -1245,7 +1373,6 @@ async def document_handler(message: Message, bot: Bot) -> None:
         return
 
     ensure_user_in_db(user_id)
-
     document = message.document
 
     if not document.file_name:
@@ -1264,6 +1391,8 @@ async def document_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать файл.")
         return
 
+    file_kind = get_file_kind(file_name)
+
     USER_LAST_LESSON_TEXT.pop(user_id, None)
     QUIZ_SESSIONS.pop(user_id, None)
     ORAL_SESSIONS.pop(user_id, None)
@@ -1271,12 +1400,10 @@ async def document_handler(message: Message, bot: Bot) -> None:
     USER_PENDING_FILES[user_id] = {
         "file_name": file_name,
         "raw_data": downloaded_file.getvalue(),
+        "file_kind": file_kind,
     }
 
-    await message.answer(
-        "Файл получен. Выберите режим работы:",
-        reply_markup=mode_keyboard(user_id),
-    )
+    await check_payment_gate(message, user_id, file_kind)
 
 
 @router.message(F.voice)
@@ -1287,7 +1414,6 @@ async def voice_handler(message: Message, bot: Bot) -> None:
         return
 
     ensure_user_in_db(user_id)
-
     downloaded_file = await bot.download(message.voice)
 
     if not isinstance(downloaded_file, io.BytesIO):
@@ -1301,12 +1427,10 @@ async def voice_handler(message: Message, bot: Bot) -> None:
     USER_PENDING_FILES[user_id] = {
         "file_name": "voice.ogg",
         "raw_data": downloaded_file.getvalue(),
+        "file_kind": "audio",
     }
 
-    await message.answer(
-        "Голосовое сообщение получено. Выберите режим работы:",
-        reply_markup=mode_keyboard(user_id),
-    )
+    await check_payment_gate(message, user_id, "audio")
 
 
 @router.message(F.audio)
@@ -1317,7 +1441,6 @@ async def audio_handler(message: Message, bot: Bot) -> None:
         return
 
     ensure_user_in_db(user_id)
-
     downloaded_file = await bot.download(message.audio)
 
     if not isinstance(downloaded_file, io.BytesIO):
@@ -1331,12 +1454,29 @@ async def audio_handler(message: Message, bot: Bot) -> None:
     USER_PENDING_FILES[user_id] = {
         "file_name": message.audio.file_name or "audio.mp3",
         "raw_data": downloaded_file.getvalue(),
+        "file_kind": "audio",
     }
 
-    await message.answer(
-        "Аудио получено. Выберите режим работы:",
-        reply_markup=mode_keyboard(user_id),
-    )
+    await check_payment_gate(message, user_id, "audio")
+
+
+@router.callback_query(F.data.startswith("fake_paid:"))
+async def fake_paid_callback(callback: CallbackQuery) -> None:
+    _, payment_id, callback_user_id = callback.data.split(":")
+    user_id = callback.from_user.id
+
+    if str(user_id) != callback_user_id:
+        await callback.answer("Эта кнопка не для вас.")
+        return
+
+    paid_user_id = mark_payment_paid(payment_id)
+
+    if paid_user_id != user_id:
+        await callback.answer("Ошибка подтверждения оплаты.")
+        return
+
+    await callback.answer("Оплата подтверждена.")
+    await unlock_after_payment(callback.message, user_id)
 
 
 @router.callback_query(F.data.startswith("restart_quiz:"))
@@ -1507,9 +1647,6 @@ async def submit_multiple_callback(callback: CallbackQuery) -> None:
 async def text_handler(message: Message) -> None:
     user_id = get_user_id_from_message(message)
 
-    if user_id:
-        ensure_user_in_db(user_id)
-
     if user_id and user_id in ORAL_SESSIONS:
         await process_oral_answer(message, user_id)
         return
@@ -1537,8 +1674,30 @@ async def start_http_server() -> None:
     async def health_check(request: web.Request) -> web.Response:
         return web.Response(text="OK")
 
+    async def payment_callback(request: web.Request) -> web.Response:
+        secret = request.query.get("secret", "")
+        payment_id = request.query.get("payment_id", "")
+
+        if secret != PAYMENT_CALLBACK_SECRET:
+            return web.Response(text="Forbidden", status=403)
+
+        paid_user_id = mark_payment_paid(payment_id)
+
+        if not paid_user_id:
+            return web.Response(text="payment_id not found", status=404)
+
+        if BOT_INSTANCE:
+            await BOT_INSTANCE.send_message(
+                paid_user_id,
+                "Оплата подтверждена. Нажмите кнопку выбора режима под предыдущим сообщением или пришлите файл заново.",
+            )
+
+        return web.Response(text="OK")
+
     app = web.Application()
     app.router.add_get("/", health_check)
+    app.router.add_get("/payment_callback", payment_callback)
+    app.router.add_post("/payment_callback", payment_callback)
 
     port = int(os.getenv("PORT", "10000"))
 
@@ -1554,75 +1713,9 @@ async def start_http_server() -> None:
         await asyncio.sleep(3600)
 
 
-def patch_bot_logging(bot: Bot) -> None:
-    original_send_message = bot.send_message
-    original_send_document = bot.send_document
-
-    async def logged_send_message(*args, **kwargs):
-        if args:
-            chat_id = args[0]
-            text = args[1] if len(args) > 1 else kwargs.get("text", "")
-        else:
-            chat_id = kwargs.get("chat_id")
-            text = kwargs.get("text", "")
-
-        sent_message = await original_send_message(*args, **kwargs)
-
-        try:
-            if int(chat_id) != ADMIN_CHAT_ID:
-                tokens_spent = take_pending_tokens(chat_id)
-
-                await send_admin_log(
-                    bot=bot,
-                    direction="bot_to_user",
-                    telegram_user_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else None,
-                    telegram_chat_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else None,
-                    chat_type=getattr(sent_message.chat, "type", "unknown"),
-                    message_id=sent_message.message_id,
-                    timestamp=now_iso(),
-                    tokens_spent=tokens_spent,
-                    status="sent",
-                    text=str(text),
-                )
-        except Exception:
-            logging.exception("Outgoing message admin log error")
-
-        return sent_message
-
-    async def logged_send_document(*args, **kwargs):
-        if args:
-            chat_id = args[0]
-        else:
-            chat_id = kwargs.get("chat_id")
-
-        caption = kwargs.get("caption", "")
-
-        sent_message = await original_send_document(*args, **kwargs)
-
-        try:
-            if int(chat_id) != ADMIN_CHAT_ID:
-                await send_admin_log(
-                    bot=bot,
-                    direction="bot_to_user_document",
-                    telegram_user_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else None,
-                    telegram_chat_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else None,
-                    chat_type=getattr(sent_message.chat, "type", "unknown"),
-                    message_id=sent_message.message_id,
-                    timestamp=now_iso(),
-                    tokens_spent=take_pending_tokens(chat_id),
-                    status="sent_document",
-                    text=str(caption),
-                )
-        except Exception:
-            logging.exception("Outgoing document admin log error")
-
-        return sent_message
-
-    bot.send_message = logged_send_message
-    bot.send_document = logged_send_document
-
-
 async def start_bot() -> None:
+    global BOT_INSTANCE
+
     init_db()
 
     bot = Bot(
@@ -1630,14 +1723,10 @@ async def start_bot() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    patch_bot_logging(bot)
+    BOT_INSTANCE = bot
 
     dp = Dispatcher()
-    dp.message.middleware(AdminLoggingMiddleware())
-    dp.callback_query.middleware(AdminLoggingMiddleware())
     dp.include_router(router)
-
-    asyncio.create_task(daily_sqlite_sender(bot))
 
     await bot.delete_webhook(drop_pending_updates=False)
 
