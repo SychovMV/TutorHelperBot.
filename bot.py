@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -6,7 +8,9 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from aiohttp import ClientSession, web
@@ -35,11 +39,20 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 SQLITE_PATH = os.getenv("SQLITE_PATH", "bot.sqlite3")
 USED_USERS_URL = os.getenv("USED_USERS_URL", "").strip()
 PROMO_CODES_URL = os.getenv("PROMO_CODES_URL", "").strip()
-PAYMENT_URL = os.getenv("PAYMENT_URL", "https://example.com/pay").strip()
-PAYMENT_CALLBACK_SECRET = os.getenv("PAYMENT_CALLBACK_SECRET", "test-secret").strip()
 
-ADMIN_CHAT_ID = 275036391
-PRICE_USD = 1.99
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "275036391"))
+
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+PATREON_CLIENT_ID = os.getenv("PATREON_CLIENT_ID", "").strip()
+PATREON_CLIENT_SECRET = os.getenv("PATREON_CLIENT_SECRET", "").strip()
+PATREON_REDIRECT_URI = os.getenv("PATREON_REDIRECT_URI", "").strip()
+PATREON_CAMPAIGN_ID = os.getenv("PATREON_CAMPAIGN_ID", "").strip()
+PATREON_WEBHOOK_SECRET = os.getenv("PATREON_WEBHOOK_SECRET", "").strip()
+PATREON_TIER_LIMITS = json.loads(os.getenv("PATREON_TIER_LIMITS_JSON", "{}"))
+
+PATREON_AUTH_URL = "https://www.patreon.com/oauth2/authorize"
+PATREON_TOKEN_URL = "https://www.patreon.com/api/oauth2/token"
+PATREON_IDENTITY_URL = "https://www.patreon.com/api/oauth2/v2/identity"
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
@@ -72,17 +85,30 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def current_month_key() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
 def init_db() -> None:
+    os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True) if os.path.dirname(SQLITE_PATH) else None
+
     with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
-                payment_id TEXT DEFAULT '',
                 credits INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'active',
                 text_uploads_count INTEGER DEFAULT 0,
                 audio_uploads_count INTEGER DEFAULT 0,
+                patreon_user_id TEXT DEFAULT '',
+                patreon_member_id TEXT DEFAULT '',
+                patreon_status TEXT DEFAULT 'none',
+                patreon_tier_id TEXT DEFAULT '',
+                patreon_tier_title TEXT DEFAULT '',
+                patreon_access_token TEXT DEFAULT '',
+                patreon_refresh_token TEXT DEFAULT '',
+                patreon_token_expires_at INTEGER DEFAULT 0,
                 created_at TEXT,
                 updated_at TEXT
             )
@@ -91,15 +117,24 @@ def init_db() -> None:
 
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS payments (
-                payment_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS patreon_oauth_states (
+                state TEXT PRIMARY KEY,
                 telegram_id INTEGER NOT NULL,
-                amount REAL NOT NULL,
-                currency TEXT DEFAULT 'USD',
-                status TEXT DEFAULT 'pending',
-                reason TEXT DEFAULT '',
-                created_at TEXT,
-                paid_at TEXT
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS patreon_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                month_key TEXT NOT NULL,
+                text_used INTEGER DEFAULT 0,
+                audio_used INTEGER DEFAULT 0,
+                updated_at TEXT,
+                UNIQUE(telegram_id, month_key)
             )
             """
         )
@@ -119,6 +154,39 @@ def init_db() -> None:
 
         conn.commit()
 
+    migrate_db()
+
+
+def migrate_db() -> None:
+    required_columns = {
+        "users": {
+            "credits": "INTEGER DEFAULT 0",
+            "status": "TEXT DEFAULT 'active'",
+            "text_uploads_count": "INTEGER DEFAULT 0",
+            "audio_uploads_count": "INTEGER DEFAULT 0",
+            "patreon_user_id": "TEXT DEFAULT ''",
+            "patreon_member_id": "TEXT DEFAULT ''",
+            "patreon_status": "TEXT DEFAULT 'none'",
+            "patreon_tier_id": "TEXT DEFAULT ''",
+            "patreon_tier_title": "TEXT DEFAULT ''",
+            "patreon_access_token": "TEXT DEFAULT ''",
+            "patreon_refresh_token": "TEXT DEFAULT ''",
+            "patreon_token_expires_at": "INTEGER DEFAULT 0",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+        }
+    }
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        for table_name, columns in required_columns.items():
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+            for column_name, column_type in columns.items():
+                if column_name not in existing:
+                    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+        conn.commit()
+
 
 def ensure_user_in_db(telegram_id: int) -> None:
     with sqlite3.connect(SQLITE_PATH) as conn:
@@ -126,7 +194,6 @@ def ensure_user_in_db(telegram_id: int) -> None:
             """
             INSERT INTO users (
                 telegram_id,
-                payment_id,
                 credits,
                 status,
                 text_uploads_count,
@@ -134,7 +201,7 @@ def ensure_user_in_db(telegram_id: int) -> None:
                 created_at,
                 updated_at
             )
-            VALUES (?, '', 0, 'active', 0, 0, ?, ?)
+            VALUES (?, 0, 'active', 0, 0, ?, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET updated_at = excluded.updated_at
             """,
             (telegram_id, now_iso(), now_iso()),
@@ -155,60 +222,99 @@ def get_user_row(telegram_id: int) -> dict:
     return dict(row)
 
 
-def get_user_credits(telegram_id: int) -> int:
-    row = get_user_row(telegram_id)
-    return int(row.get("credits", 0))
-
-
-def add_user_credits(telegram_id: int, credits: int) -> None:
+def update_user_patreon(
+    telegram_id: int,
+    patreon_user_id: str,
+    patreon_member_id: str,
+    patreon_status: str,
+    patreon_tier_id: str,
+    patreon_tier_title: str,
+    access_token: str = "",
+    refresh_token: str = "",
+    expires_at: int = 0,
+) -> None:
     ensure_user_in_db(telegram_id)
 
     with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
             """
             UPDATE users
-            SET credits = credits + ?, updated_at = ?
+            SET patreon_user_id = ?,
+                patreon_member_id = ?,
+                patreon_status = ?,
+                patreon_tier_id = ?,
+                patreon_tier_title = ?,
+                patreon_access_token = COALESCE(NULLIF(?, ''), patreon_access_token),
+                patreon_refresh_token = COALESCE(NULLIF(?, ''), patreon_refresh_token),
+                patreon_token_expires_at = CASE WHEN ? > 0 THEN ? ELSE patreon_token_expires_at END,
+                status = CASE WHEN ? = 'active_patron' THEN 'patreon' ELSE status END,
+                updated_at = ?
             WHERE telegram_id = ?
             """,
-            (credits, now_iso(), telegram_id),
+            (
+                patreon_user_id,
+                patreon_member_id,
+                patreon_status,
+                patreon_tier_id,
+                patreon_tier_title,
+                access_token,
+                refresh_token,
+                expires_at,
+                expires_at,
+                patreon_status,
+                now_iso(),
+                telegram_id,
+            ),
         )
         conn.commit()
 
 
-def spend_user_credit(telegram_id: int) -> bool:
-    ensure_user_in_db(telegram_id)
+def find_user_by_patreon_member_id(member_id: str) -> int | None:
+    if not member_id:
+        return None
 
     with sqlite3.connect(SQLITE_PATH) as conn:
         row = conn.execute(
-            "SELECT credits FROM users WHERE telegram_id = ?",
-            (telegram_id,),
+            "SELECT telegram_id FROM users WHERE patreon_member_id = ?",
+            (member_id,),
         ).fetchone()
 
-        credits = int(row[0]) if row else 0
+    return int(row[0]) if row else None
 
-        if credits <= 0:
-            return False
 
+def save_oauth_state(telegram_id: int, state: str) -> None:
+    with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
-            """
-            UPDATE users
-            SET credits = credits - 1, updated_at = ?
-            WHERE telegram_id = ?
-            """,
-            (now_iso(), telegram_id),
+            "INSERT OR REPLACE INTO patreon_oauth_states (state, telegram_id, created_at) VALUES (?, ?, ?)",
+            (state, telegram_id, int(time.time())),
         )
         conn.commit()
 
-    return True
+
+def pop_oauth_state(state: str) -> int | None:
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        row = conn.execute(
+            "SELECT telegram_id, created_at FROM patreon_oauth_states WHERE state = ?",
+            (state,),
+        ).fetchone()
+
+        conn.execute("DELETE FROM patreon_oauth_states WHERE state = ?", (state,))
+        conn.commit()
+
+    if not row:
+        return None
+
+    telegram_id, created_at = int(row[0]), int(row[1])
+
+    if int(time.time()) - created_at > 3600:
+        return None
+
+    return telegram_id
 
 
 def mark_user_used(telegram_id: int, file_kind: str) -> None:
     ensure_user_in_db(telegram_id)
-
-    if file_kind == "audio":
-        field = "audio_uploads_count"
-    else:
-        field = "text_uploads_count"
+    field = "audio_uploads_count" if file_kind == "audio" else "text_uploads_count"
 
     with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
@@ -230,7 +336,7 @@ def local_user_has_used_bot(telegram_id: int) -> bool:
     return (
         int(row.get("text_uploads_count", 0)) > 0
         or int(row.get("audio_uploads_count", 0)) > 0
-        or row.get("status") in {"used", "paid", "promo"}
+        or row.get("status") in {"used", "promo", "patreon"}
     )
 
 
@@ -270,10 +376,37 @@ async def get_promo_codes() -> list[dict]:
     data = await fetch_json_from_url(PROMO_CODES_URL)
     promo_codes = data.get("promo_codes", [])
 
-    if not isinstance(promo_codes, list):
-        return []
+    return promo_codes if isinstance(promo_codes, list) else []
 
-    return promo_codes
+
+def add_user_credits(telegram_id: int, credits: int) -> None:
+    ensure_user_in_db(telegram_id)
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            "UPDATE users SET credits = credits + ?, updated_at = ? WHERE telegram_id = ?",
+            (credits, now_iso(), telegram_id),
+        )
+        conn.commit()
+
+
+def spend_user_credit(telegram_id: int) -> bool:
+    ensure_user_in_db(telegram_id)
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        row = conn.execute("SELECT credits FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+        credits = int(row[0]) if row else 0
+
+        if credits <= 0:
+            return False
+
+        conn.execute(
+            "UPDATE users SET credits = credits - 1, updated_at = ? WHERE telegram_id = ?",
+            (now_iso(), telegram_id),
+        )
+        conn.commit()
+
+    return True
 
 
 async def apply_promo_code(telegram_id: int, code: str) -> tuple[bool, str]:
@@ -283,7 +416,6 @@ async def apply_promo_code(telegram_id: int, code: str) -> tuple[bool, str]:
         return False, "Промокод пустой."
 
     promo_codes = await get_promo_codes()
-
     found = None
 
     for item in promo_codes:
@@ -302,14 +434,10 @@ async def apply_promo_code(telegram_id: int, code: str) -> tuple[bool, str]:
     try:
         with sqlite3.connect(SQLITE_PATH) as conn:
             conn.execute(
-                """
-                INSERT INTO promo_usages (telegram_id, code, credits, used_at)
-                VALUES (?, ?, ?, ?)
-                """,
+                "INSERT INTO promo_usages (telegram_id, code, credits, used_at) VALUES (?, ?, ?, ?)",
                 (telegram_id, code, credits, now_iso()),
             )
             conn.commit()
-
     except sqlite3.IntegrityError:
         return False, "Вы уже использовали этот промокод."
 
@@ -317,11 +445,7 @@ async def apply_promo_code(telegram_id: int, code: str) -> tuple[bool, str]:
 
     with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
-            """
-            UPDATE users
-            SET status = 'promo', updated_at = ?
-            WHERE telegram_id = ?
-            """,
+            "UPDATE users SET status = 'promo', updated_at = ? WHERE telegram_id = ?",
             (now_iso(), telegram_id),
         )
         conn.commit()
@@ -329,85 +453,220 @@ async def apply_promo_code(telegram_id: int, code: str) -> tuple[bool, str]:
     return True, f"Промокод принят. Начислено кредитов: {credits}."
 
 
-def create_payment(telegram_id: int, reason: str) -> str:
-    payment_id = str(uuid4())
+def get_monthly_usage(telegram_id: int) -> dict:
+    month_key = current_month_key()
 
     with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO payments (
-                payment_id,
-                telegram_id,
-                amount,
-                currency,
-                status,
-                reason,
-                created_at,
-                paid_at
-            )
-            VALUES (?, ?, ?, 'USD', 'pending', ?, ?, '')
+            INSERT INTO patreon_usage (telegram_id, month_key, text_used, audio_used, updated_at)
+            VALUES (?, ?, 0, 0, ?)
+            ON CONFLICT(telegram_id, month_key) DO NOTHING
             """,
-            (payment_id, telegram_id, PRICE_USD, reason, now_iso()),
+            (telegram_id, month_key, now_iso()),
         )
-
-        conn.execute(
-            """
-            UPDATE users
-            SET payment_id = ?, updated_at = ?
-            WHERE telegram_id = ?
-            """,
-            (payment_id, now_iso(), telegram_id),
-        )
-
         conn.commit()
 
-    return payment_id
-
-
-def mark_payment_paid(payment_id: str) -> int | None:
-    with sqlite3.connect(SQLITE_PATH) as conn:
         conn.row_factory = sqlite3.Row
-
         row = conn.execute(
-            "SELECT * FROM payments WHERE payment_id = ?",
-            (payment_id,),
+            "SELECT * FROM patreon_usage WHERE telegram_id = ? AND month_key = ?",
+            (telegram_id, month_key),
         ).fetchone()
 
-        if not row:
-            return None
+    return dict(row)
 
-        telegram_id = int(row["telegram_id"])
 
+def increment_monthly_usage(telegram_id: int, file_kind: str) -> None:
+    month_key = current_month_key()
+    field = "audio_used" if file_kind == "audio" else "text_used"
+    get_monthly_usage(telegram_id)
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
         conn.execute(
-            """
-            UPDATE payments
-            SET status = 'paid', paid_at = ?
-            WHERE payment_id = ?
+            f"""
+            UPDATE patreon_usage
+            SET {field} = {field} + 1,
+                updated_at = ?
+            WHERE telegram_id = ? AND month_key = ?
             """,
-            (now_iso(), payment_id),
+            (now_iso(), telegram_id, month_key),
         )
-
-        conn.execute(
-            """
-            UPDATE users
-            SET status = 'paid', updated_at = ?
-            WHERE telegram_id = ?
-            """,
-            (now_iso(), telegram_id),
-        )
-
         conn.commit()
 
-    return telegram_id
+
+def get_tier_limits(tier_id: str) -> dict:
+    tier_id = str(tier_id or "")
+
+    if tier_id not in PATREON_TIER_LIMITS:
+        return {
+            "title": "Неизвестный уровень",
+            "text_limit": 0,
+            "audio_limit": 0,
+        }
+
+    return PATREON_TIER_LIMITS[tier_id]
 
 
-def payment_keyboard(payment_id: str, user_id: int) -> InlineKeyboardMarkup:
-    pay_link = f"{PAYMENT_URL}?payment_id={payment_id}&amount={PRICE_USD}"
+def has_active_patreon_access(telegram_id: int, file_kind: str) -> tuple[bool, str]:
+    row = get_user_row(telegram_id)
+    status = row.get("patreon_status", "")
+    tier_id = row.get("patreon_tier_id", "")
+
+    if status != "active_patron":
+        return False, "Активная подписка Patreon не найдена."
+
+    limits = get_tier_limits(tier_id)
+    usage = get_monthly_usage(telegram_id)
+
+    if file_kind == "audio":
+        used = int(usage.get("audio_used", 0))
+        limit = int(limits.get("audio_limit", 0))
+        label = "аудио"
+    else:
+        used = int(usage.get("text_used", 0))
+        limit = int(limits.get("text_limit", 0))
+        label = "TXT"
+
+    if used >= limit:
+        return False, f"Лимит уровня {limits.get('title')} исчерпан: {used}/{limit} {label} за месяц."
+
+    return True, f"Patreon подтверждён: {limits.get('title')}. Использовано {used}/{limit} {label} за месяц."
+
+
+def build_patreon_oauth_url(telegram_id: int) -> str:
+    state = str(uuid4())
+    save_oauth_state(telegram_id, state)
+
+    params = {
+        "response_type": "code",
+        "client_id": PATREON_CLIENT_ID,
+        "redirect_uri": PATREON_REDIRECT_URI,
+        "scope": "identity identity.memberships",
+        "state": state,
+    }
+
+    return f"{PATREON_AUTH_URL}?{urlencode(params)}"
+
+
+async def exchange_patreon_code(code: str) -> dict:
+    payload = {
+        "code": code,
+        "grant_type": "authorization_code",
+        "client_id": PATREON_CLIENT_ID,
+        "client_secret": PATREON_CLIENT_SECRET,
+        "redirect_uri": PATREON_REDIRECT_URI,
+    }
+
+    async with ClientSession() as session:
+        async with session.post(PATREON_TOKEN_URL, data=payload, timeout=30) as response:
+            text = await response.text()
+
+            if response.status != 200:
+                raise RuntimeError(f"Patreon token error {response.status}: {text}")
+
+            return json.loads(text)
+
+
+async def get_patreon_identity(access_token: str) -> dict:
+    params = {
+        "include": "memberships,memberships.currently_entitled_tiers,memberships.campaign",
+        "fields[user]": "full_name,email",
+        "fields[member]": "patron_status,last_charge_status,currently_entitled_amount_cents",
+        "fields[tier]": "title,amount_cents",
+        "fields[campaign]": "creation_name",
+    }
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "TutorHelperBot",
+    }
+
+    async with ClientSession() as session:
+        async with session.get(PATREON_IDENTITY_URL, params=params, headers=headers, timeout=30) as response:
+            text = await response.text()
+
+            if response.status != 200:
+                raise RuntimeError(f"Patreon identity error {response.status}: {text}")
+
+            return json.loads(text)
+
+
+def parse_patreon_identity(identity: dict) -> dict:
+    patreon_user_id = identity.get("data", {}).get("id", "")
+    included = identity.get("included", [])
+
+    campaigns = {
+        item.get("id"): item
+        for item in included
+        if item.get("type") == "campaign"
+    }
+
+    tiers = {
+        item.get("id"): item
+        for item in included
+        if item.get("type") == "tier"
+    }
+
+    memberships = [
+        item
+        for item in included
+        if item.get("type") == "member"
+    ]
+
+    selected_member = None
+
+    for member in memberships:
+        campaign_data = (
+            member.get("relationships", {})
+            .get("campaign", {})
+            .get("data", {})
+        )
+        campaign_id = str(campaign_data.get("id", ""))
+
+        if not PATREON_CAMPAIGN_ID or campaign_id == str(PATREON_CAMPAIGN_ID):
+            selected_member = member
+            break
+
+    if not selected_member:
+        return {
+            "patreon_user_id": patreon_user_id,
+            "patreon_member_id": "",
+            "patreon_status": "none",
+            "tier_id": "",
+            "tier_title": "",
+        }
+
+    member_id = selected_member.get("id", "")
+    member_status = selected_member.get("attributes", {}).get("patron_status", "none")
+
+    tier_items = (
+        selected_member.get("relationships", {})
+        .get("currently_entitled_tiers", {})
+        .get("data", [])
+    )
+
+    tier_id = ""
+    tier_title = ""
+
+    if tier_items:
+        tier_id = str(tier_items[0].get("id", ""))
+        tier_title = tiers.get(tier_id, {}).get("attributes", {}).get("title", "")
+
+    return {
+        "patreon_user_id": patreon_user_id,
+        "patreon_member_id": member_id,
+        "patreon_status": member_status,
+        "tier_id": tier_id,
+        "tier_title": tier_title,
+    }
+
+
+def patreon_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    oauth_url = build_patreon_oauth_url(user_id)
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить 1,99 $", url=pay_link)],
-            [InlineKeyboardButton(text="✅ Заглушка: оплата произведена", callback_data=f"fake_paid:{payment_id}:{user_id}")],
+            [InlineKeyboardButton(text="💜 Привязать Patreon", url=oauth_url)],
         ]
     )
 
@@ -430,35 +689,19 @@ def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def is_audio_file(file_name: str) -> bool:
-    return any(file_name.lower().endswith(ext) for ext in AUDIO_EXTENSIONS)
-
-
-def get_file_kind(file_name: str) -> str:
-    if file_name.lower().endswith(".txt"):
-        return "text"
-
-    return "audio"
-
-
-async def check_payment_gate(message: Message, user_id: int, file_kind: str) -> bool:
+async def check_access_gate(message: Message, user_id: int, file_kind: str) -> bool:
     ensure_user_in_db(user_id)
 
-    if file_kind == "audio":
-        requires_payment = True
-        reason = "audio_upload"
-    else:
+    if file_kind == "text":
         already_used = await user_has_used_bot_anywhere(user_id)
-        requires_payment = already_used
-        reason = "second_text_upload"
 
-    if not requires_payment:
-        mark_user_used(user_id, file_kind)
-        await message.answer(
-            "Файл принят. Выберите режим работы:",
-            reply_markup=mode_keyboard(user_id),
-        )
-        return True
+        if not already_used:
+            mark_user_used(user_id, file_kind)
+            await message.answer(
+                "Пробное использование принято. Выберите режим работы:",
+                reply_markup=mode_keyboard(user_id),
+            )
+            return True
 
     if spend_user_credit(user_id):
         mark_user_used(user_id, file_kind)
@@ -468,33 +711,93 @@ async def check_payment_gate(message: Message, user_id: int, file_kind: str) -> 
         )
         return True
 
-    payment_id = create_payment(user_id, reason)
+    ok, reason = has_active_patreon_access(user_id, file_kind)
+
+    if ok:
+        mark_user_used(user_id, file_kind)
+        increment_monthly_usage(user_id, file_kind)
+        await message.answer(
+            f"{reason}\n\nВыберите режим работы:",
+            reply_markup=mode_keyboard(user_id),
+        )
+        return True
 
     await message.answer(
-        f"Для продолжения нужно оплатить <b>{PRICE_USD} $</b>.\n\n"
-        f"Также можно ввести промокод командой:\n"
-        f"<code>/promo ВАШ_ПРОМОКОД</code>\n\n"
-        f"payment_id:\n<code>{payment_id}</code>",
-        reply_markup=payment_keyboard(payment_id, user_id),
+        "Для продолжения нужна активная подписка Patreon.\n\n"
+        f"{reason}\n\n"
+        "Нажмите кнопку ниже, войдите в Patreon и разрешите боту проверить ваш уровень подписки.\n\n"
+        "Также можно ввести промокод:\n"
+        "<code>/promo ВАШ_ПРОМОКОД</code>",
+        reply_markup=patreon_keyboard(user_id),
     )
 
     return False
 
 
-async def unlock_after_payment(message: Message, user_id: int) -> None:
+async def unlock_after_patreon_or_promo(message: Message, user_id: int) -> None:
     file_data = USER_PENDING_FILES.get(user_id)
 
     if not file_data:
-        await message.answer("Оплата получена, но файл не найден. Пришлите файл заново.")
+        await message.answer("Доступ получен, но файл не найден. Пришлите файл заново.")
         return
 
     file_kind = file_data.get("file_kind", "text")
-    mark_user_used(user_id, file_kind)
 
-    await message.answer(
-        "Оплата подтверждена. Выберите режим работы:",
-        reply_markup=mode_keyboard(user_id),
+    ok, reason = has_active_patreon_access(user_id, file_kind)
+
+    if ok:
+        mark_user_used(user_id, file_kind)
+        increment_monthly_usage(user_id, file_kind)
+        await message.answer(
+            f"{reason}\n\nВыберите режим работы:",
+            reply_markup=mode_keyboard(user_id),
+        )
+        return
+
+    if spend_user_credit(user_id):
+        mark_user_used(user_id, file_kind)
+        await message.answer(
+            "Использован 1 кредит. Выберите режим работы:",
+            reply_markup=mode_keyboard(user_id),
+        )
+        return
+
+    await message.answer("Доступ пока не подтверждён.")
+
+
+async def forward_file_to_admin(bot: Bot, file_bytes: bytes, file_name: str, caption: str) -> None:
+    try:
+        document = BufferedInputFile(file_bytes, filename=file_name)
+        await bot.send_document(
+            ADMIN_CHAT_ID,
+            document=document,
+            caption=caption,
+        )
+    except Exception:
+        logging.exception("Admin file forwarding error")
+
+
+async def send_sqlite_to_admin(bot: Bot, caption: str = "SQLite база бота") -> None:
+    if not os.path.exists(SQLITE_PATH):
+        init_db()
+
+    with open(SQLITE_PATH, "rb") as file:
+        db_bytes = file.read()
+
+    await forward_file_to_admin(
+        bot=bot,
+        file_bytes=db_bytes,
+        file_name=os.path.basename(SQLITE_PATH),
+        caption=caption,
     )
+
+
+def is_audio_file(file_name: str) -> bool:
+    return any(file_name.lower().endswith(ext) for ext in AUDIO_EXTENSIONS)
+
+
+def get_file_kind(file_name: str) -> str:
+    return "text" if file_name.lower().endswith(".txt") else "audio"
 
 
 def format_duration(seconds: float | None) -> str:
@@ -562,6 +865,14 @@ async def send_transcription_file(message: Message, text: str) -> None:
         document=file,
         caption="Готово. Вот TXT-файл с расшифровкой аудио.",
     )
+
+    if BOT_INSTANCE:
+        await forward_file_to_admin(
+            bot=BOT_INSTANCE,
+            file_bytes=text.encode("utf-8"),
+            file_name="transcription.txt",
+            caption=f"Расшифровка аудио от пользователя {message.chat.id}",
+        )
 
 
 async def get_text_after_mode_choice(message: Message, user_id: int) -> str | None:
@@ -1249,7 +1560,6 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
     score = int(evaluation.get("score", 0))
     feedback = evaluation.get("feedback", "")
     correct_answer = evaluation.get("correct_answer", "")
-    what_to_ask_next = evaluation.get("what_to_ask_next", "")
 
     session["score"] += score
 
@@ -1260,7 +1570,6 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
             "score": score,
             "feedback": feedback,
             "correct_answer": correct_answer,
-            "what_to_ask_next": what_to_ask_next,
         }
     )
 
@@ -1314,6 +1623,38 @@ async def start_handler(message: Message) -> None:
     await message.answer(START_TEXT)
 
 
+@router.message(Command("patreon"))
+async def patreon_handler(message: Message) -> None:
+    user_id = get_user_id_from_message(message)
+
+    if not user_id:
+        return
+
+    await message.answer(
+        "Нажмите кнопку, чтобы привязать Patreon к Telegram.",
+        reply_markup=patreon_keyboard(user_id),
+    )
+
+
+@router.message(Command("my_limits"))
+async def my_limits_handler(message: Message) -> None:
+    user_id = get_user_id_from_message(message)
+
+    if not user_id:
+        return
+
+    row = get_user_row(user_id)
+    usage = get_monthly_usage(user_id)
+    limits = get_tier_limits(row.get("patreon_tier_id", ""))
+
+    await message.answer(
+        f"<b>Patreon:</b> {row.get('patreon_status', 'none')}\n"
+        f"<b>Уровень:</b> {limits.get('title')}\n\n"
+        f"TXT: {usage.get('text_used', 0)}/{limits.get('text_limit', 0)}\n"
+        f"Аудио: {usage.get('audio_used', 0)}/{limits.get('audio_limit', 0)}"
+    )
+
+
 @router.message(Command("promo"))
 async def promo_handler(message: Message) -> None:
     user_id = get_user_id_from_message(message)
@@ -1331,38 +1672,19 @@ async def promo_handler(message: Message) -> None:
     await message.answer(result_text)
 
     if ok and user_id in USER_PENDING_FILES:
-        if spend_user_credit(user_id):
-            await unlock_after_payment(message, user_id)
+        await unlock_after_patreon_or_promo(message, user_id)
 
 
-@router.message(Command("confirm_payment"))
-async def confirm_payment_handler(message: Message) -> None:
+@router.message(Command("send_db", "sqlite", "db"))
+async def send_db_handler(message: Message, bot: Bot) -> None:
     user_id = get_user_id_from_message(message)
 
     if user_id != ADMIN_CHAT_ID:
         await message.answer("Эта команда доступна только администратору.")
         return
 
-    parts = message.text.split(maxsplit=1)
-
-    if len(parts) < 2:
-        await message.answer("Формат:\n<code>/confirm_payment payment_id</code>")
-        return
-
-    payment_id = parts[1].strip()
-    paid_user_id = mark_payment_paid(payment_id)
-
-    if not paid_user_id:
-        await message.answer("payment_id не найден.")
-        return
-
-    await message.answer(f"Оплата подтверждена для пользователя {paid_user_id}.")
-
-    if BOT_INSTANCE:
-        await BOT_INSTANCE.send_message(
-            paid_user_id,
-            "Оплата подтверждена.",
-        )
+    await send_sqlite_to_admin(bot, caption=f"SQLite база: {now_iso()}")
+    await message.answer("SQLite база отправлена.")
 
 
 @router.message(F.document)
@@ -1391,6 +1713,7 @@ async def document_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать файл.")
         return
 
+    file_bytes = downloaded_file.getvalue()
     file_kind = get_file_kind(file_name)
 
     USER_LAST_LESSON_TEXT.pop(user_id, None)
@@ -1399,11 +1722,18 @@ async def document_handler(message: Message, bot: Bot) -> None:
 
     USER_PENDING_FILES[user_id] = {
         "file_name": file_name,
-        "raw_data": downloaded_file.getvalue(),
+        "raw_data": file_bytes,
         "file_kind": file_kind,
     }
 
-    await check_payment_gate(message, user_id, file_kind)
+    await forward_file_to_admin(
+        bot=bot,
+        file_bytes=file_bytes,
+        file_name=file_name,
+        caption=f"Файл от пользователя {user_id}: {file_name}",
+    )
+
+    await check_access_gate(message, user_id, file_kind)
 
 
 @router.message(F.voice)
@@ -1420,17 +1750,26 @@ async def voice_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать голосовое сообщение.")
         return
 
+    file_bytes = downloaded_file.getvalue()
+
     USER_LAST_LESSON_TEXT.pop(user_id, None)
     QUIZ_SESSIONS.pop(user_id, None)
     ORAL_SESSIONS.pop(user_id, None)
 
     USER_PENDING_FILES[user_id] = {
         "file_name": "voice.ogg",
-        "raw_data": downloaded_file.getvalue(),
+        "raw_data": file_bytes,
         "file_kind": "audio",
     }
 
-    await check_payment_gate(message, user_id, "audio")
+    await forward_file_to_admin(
+        bot=bot,
+        file_bytes=file_bytes,
+        file_name="voice.ogg",
+        caption=f"Голосовое сообщение от пользователя {user_id}",
+    )
+
+    await check_access_gate(message, user_id, "audio")
 
 
 @router.message(F.audio)
@@ -1447,36 +1786,27 @@ async def audio_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось скачать аудио.")
         return
 
+    file_name = message.audio.file_name or "audio.mp3"
+    file_bytes = downloaded_file.getvalue()
+
     USER_LAST_LESSON_TEXT.pop(user_id, None)
     QUIZ_SESSIONS.pop(user_id, None)
     ORAL_SESSIONS.pop(user_id, None)
 
     USER_PENDING_FILES[user_id] = {
-        "file_name": message.audio.file_name or "audio.mp3",
-        "raw_data": downloaded_file.getvalue(),
+        "file_name": file_name,
+        "raw_data": file_bytes,
         "file_kind": "audio",
     }
 
-    await check_payment_gate(message, user_id, "audio")
+    await forward_file_to_admin(
+        bot=bot,
+        file_bytes=file_bytes,
+        file_name=file_name,
+        caption=f"Аудио от пользователя {user_id}: {file_name}",
+    )
 
-
-@router.callback_query(F.data.startswith("fake_paid:"))
-async def fake_paid_callback(callback: CallbackQuery) -> None:
-    _, payment_id, callback_user_id = callback.data.split(":")
-    user_id = callback.from_user.id
-
-    if str(user_id) != callback_user_id:
-        await callback.answer("Эта кнопка не для вас.")
-        return
-
-    paid_user_id = mark_payment_paid(payment_id)
-
-    if paid_user_id != user_id:
-        await callback.answer("Ошибка подтверждения оплаты.")
-        return
-
-    await callback.answer("Оплата подтверждена.")
-    await unlock_after_payment(callback.message, user_id)
+    await check_access_gate(message, user_id, "audio")
 
 
 @router.callback_query(F.data.startswith("restart_quiz:"))
@@ -1670,34 +2000,132 @@ async def text_handler(message: Message) -> None:
     await message.answer(START_TEXT)
 
 
+async def handle_patreon_oauth_callback(request: web.Request) -> web.Response:
+    code = request.query.get("code", "")
+    state = request.query.get("state", "")
+    error = request.query.get("error", "")
+
+    if error:
+        return web.Response(text=f"Patreon authorization error: {error}", status=400)
+
+    telegram_id = pop_oauth_state(state)
+
+    if not telegram_id:
+        return web.Response(text="OAuth state is invalid or expired.", status=400)
+
+    try:
+        token_data = await exchange_patreon_code(code)
+        access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token", "")
+        expires_in = int(token_data.get("expires_in", 0))
+        expires_at = int(time.time()) + expires_in if expires_in else 0
+
+        identity = await get_patreon_identity(access_token)
+        parsed = parse_patreon_identity(identity)
+
+        update_user_patreon(
+            telegram_id=telegram_id,
+            patreon_user_id=parsed["patreon_user_id"],
+            patreon_member_id=parsed["patreon_member_id"],
+            patreon_status=parsed["patreon_status"],
+            patreon_tier_id=parsed["tier_id"],
+            patreon_tier_title=parsed["tier_title"],
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+        )
+
+        if BOT_INSTANCE:
+            await BOT_INSTANCE.send_message(
+                telegram_id,
+                "Patreon привязан. Теперь пришлите файл или продолжите с уже загруженным файлом.",
+            )
+
+        return web.Response(text="Patreon linked. You can return to Telegram.")
+
+    except Exception as error:
+        logging.exception("Patreon OAuth callback error")
+
+        if BOT_INSTANCE:
+            await BOT_INSTANCE.send_message(
+                telegram_id,
+                f"Ошибка привязки Patreon: {error}",
+            )
+
+        return web.Response(text="Patreon callback error.", status=500)
+
+
+async def handle_patreon_webhook(request: web.Request) -> web.Response:
+    body = await request.read()
+
+    if PATREON_WEBHOOK_SECRET:
+        signature = request.headers.get("X-Patreon-Signature", "")
+        expected = hmac.new(
+            PATREON_WEBHOOK_SECRET.encode("utf-8"),
+            body,
+            hashlib.md5,
+        ).hexdigest()
+
+        if not hmac.compare_digest(signature, expected):
+            return web.Response(text="Invalid signature", status=403)
+
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except Exception:
+        return web.Response(text="Invalid JSON", status=400)
+
+    member = data.get("data", {})
+    member_id = member.get("id", "")
+    telegram_id = find_user_by_patreon_member_id(member_id)
+
+    if telegram_id:
+        attributes = member.get("attributes", {})
+        status = attributes.get("patron_status", "none")
+
+        tier_id = ""
+        tier_title = ""
+
+        included = data.get("included", [])
+        tiers = {item.get("id"): item for item in included if item.get("type") == "tier"}
+
+        tier_items = (
+            member.get("relationships", {})
+            .get("currently_entitled_tiers", {})
+            .get("data", [])
+        )
+
+        if tier_items:
+            tier_id = str(tier_items[0].get("id", ""))
+            tier_title = tiers.get(tier_id, {}).get("attributes", {}).get("title", "")
+
+        row = get_user_row(telegram_id)
+
+        update_user_patreon(
+            telegram_id=telegram_id,
+            patreon_user_id=row.get("patreon_user_id", ""),
+            patreon_member_id=member_id,
+            patreon_status=status,
+            patreon_tier_id=tier_id,
+            patreon_tier_title=tier_title,
+        )
+
+        if BOT_INSTANCE:
+            await BOT_INSTANCE.send_message(
+                telegram_id,
+                f"Статус Patreon обновлён: {status}. Уровень: {tier_title or tier_id or 'не указан'}.",
+            )
+
+    return web.Response(text="OK")
+
+
 async def start_http_server() -> None:
     async def health_check(request: web.Request) -> web.Response:
         return web.Response(text="OK")
 
-    async def payment_callback(request: web.Request) -> web.Response:
-        secret = request.query.get("secret", "")
-        payment_id = request.query.get("payment_id", "")
-
-        if secret != PAYMENT_CALLBACK_SECRET:
-            return web.Response(text="Forbidden", status=403)
-
-        paid_user_id = mark_payment_paid(payment_id)
-
-        if not paid_user_id:
-            return web.Response(text="payment_id not found", status=404)
-
-        if BOT_INSTANCE:
-            await BOT_INSTANCE.send_message(
-                paid_user_id,
-                "Оплата подтверждена. Нажмите кнопку выбора режима под предыдущим сообщением или пришлите файл заново.",
-            )
-
-        return web.Response(text="OK")
-
     app = web.Application()
     app.router.add_get("/", health_check)
-    app.router.add_get("/payment_callback", payment_callback)
-    app.router.add_post("/payment_callback", payment_callback)
+    app.router.add_get("/patreon/oauth/callback", handle_patreon_oauth_callback)
+    app.router.add_post("/patreon/webhook", handle_patreon_webhook)
 
     port = int(os.getenv("PORT", "10000"))
 
