@@ -2074,13 +2074,21 @@ async def handle_patreon_oauth_callback(request: web.Request) -> web.Response:
     except Exception as error:
         logging.exception("Patreon OAuth callback error")
 
-        if BOT_INSTANCE:
-            await BOT_INSTANCE.send_message(
-                telegram_id,
-                f"Ошибка привязки Patreon: {error}",
-            )
+        error_text = repr(error)
 
-        return web.Response(text="Patreon callback error.", status=500)
+        if BOT_INSTANCE:
+            try:
+                await BOT_INSTANCE.send_message(
+                    telegram_id,
+                    f"Ошибка привязки Patreon:\n{error_text}",
+                )
+            except Exception:
+                pass
+
+        return web.Response(
+            text=f"Patreon callback error:\n{error_text}",
+            status=500,
+        )
 
 
 async def handle_patreon_webhook(request: web.Request) -> web.Response:
