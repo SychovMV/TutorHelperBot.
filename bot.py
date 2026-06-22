@@ -476,7 +476,7 @@ def get_monthly_usage(telegram_id: int) -> dict:
     return dict(row)
 
 
-def increment_monthly_usage(telegram_id: int, file_kind: str) -> None:
+def increment_monthly_usage(telegram_id: int, file_kind: str, amount: int = 1) -> None:
     month_key = current_month_key()
     field = "audio_used" if file_kind == "audio" else "text_used"
     get_monthly_usage(telegram_id)
@@ -485,11 +485,11 @@ def increment_monthly_usage(telegram_id: int, file_kind: str) -> None:
         conn.execute(
             f"""
             UPDATE patreon_usage
-            SET {field} = {field} + 1,
+            SET {field} = {field} + ?,
                 updated_at = ?
             WHERE telegram_id = ? AND month_key = ?
             """,
-            (now_iso(), telegram_id, month_key),
+            (amount, now_iso(), telegram_id, month_key),
         )
         conn.commit()
 
@@ -507,7 +507,7 @@ def get_tier_limits(tier_id: str) -> dict:
     return PATREON_TIER_LIMITS[tier_id]
 
 
-def has_active_patreon_access(telegram_id: int, file_kind: str) -> tuple[bool, str]:
+def has_active_patreon_access(telegram_id: int, file_kind: str, amount: int = 1) -> tuple[bool, str]:
     row = get_user_row(telegram_id)
     status = row.get("patreon_status", "")
     tier_id = row.get("patreon_tier_id", "")
@@ -527,10 +527,18 @@ def has_active_patreon_access(telegram_id: int, file_kind: str) -> tuple[bool, s
         limit = int(limits.get("text_limit", 0))
         label = "TXT"
 
-    if used >= limit:
-        return False, f"Лимит уровня {limits.get('title')} исчерпан: {used}/{limit} {label} за месяц."
+    if used + amount > limit:
+        remaining = max(0, limit - used)
+        return False, (
+            f"Лимит уровня {limits.get('title')} недостаточен. "
+            f"Осталось: {remaining}/{limit} {label} за месяц. "
+            f"Нужно для этого файла: {amount}."
+        )
 
-    return True, f"Patreon подтверждён: {limits.get('title')}. Использовано {used}/{limit} {label} за месяц."
+    return True, (
+        f"Patreon подтверждён: {limits.get('title')}. "
+        f"Будет использовано: {used + amount}/{limit} {label} за месяц."
+    )
 
 
 def build_patreon_oauth_url(telegram_id: int) -> str:
@@ -711,11 +719,12 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
         )
         return True
 
-    ok, reason = has_active_patreon_access(user_id, file_kind)
+    usage_amount = get_pending_file_usage_amount(user_id, file_kind)
+    ok, reason = has_active_patreon_access(user_id, file_kind, usage_amount)
 
     if ok:
         mark_user_used(user_id, file_kind)
-        increment_monthly_usage(user_id, file_kind)
+        increment_monthly_usage(user_id, file_kind, usage_amount)
         await message.answer(
             f"{reason}\n\nВыберите режим работы:",
             reply_markup=mode_keyboard(user_id),
@@ -834,6 +843,25 @@ def get_audio_duration(file_bytes: bytes, file_name: str) -> float | None:
         logging.exception("Audio duration detection error")
 
     return None
+
+def get_pending_file_usage_amount(user_id: int, file_kind: str) -> int:
+    if file_kind != "audio":
+        return 1
+
+    file_data = USER_PENDING_FILES.get(user_id)
+
+    if not file_data:
+        return 1
+
+    duration = get_audio_duration(
+        file_data["raw_data"],
+        file_data["file_name"]
+    )
+
+    if duration is None:
+        return 1
+
+    return max(1, int((duration + 59) // 60))
 
 
 async def transcribe_audio(file_bytes: bytes, file_name: str) -> str:
