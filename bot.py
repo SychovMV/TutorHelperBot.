@@ -735,6 +735,7 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
         "Для продолжения нужна активная подписка Patreon.\n\n"
         f"{reason}\n\n"
         "Нажмите кнопку ниже, войдите в Patreon и разрешите боту проверить ваш уровень подписки.\n\n"
+        "Для проверки подписки бот запрашивает доступ к данным Patreon. Бот не получает доступ к паролю или платёжным данным и использует информацию только для проверки уровня подписки.\n\n"
         "Также можно ввести промокод:\n"
         "<code>/promo ВАШ_ПРОМОКОД</code>",
         reply_markup=patreon_keyboard(user_id),
@@ -2064,10 +2065,13 @@ async def handle_patreon_oauth_callback(request: web.Request) -> web.Response:
         )
 
         if BOT_INSTANCE:
-            await BOT_INSTANCE.send_message(
-                telegram_id,
-                "Patreon привязан. Теперь пришлите файл или продолжите с уже загруженным файлом.",
-            )
+            try:
+                await BOT_INSTANCE.send_message(
+                    telegram_id,
+                    "Patreon привязан. Теперь пришлите файл или продолжите с уже загруженным файлом.",
+                )
+            except Exception:
+                logging.exception("Telegram success notification error")
 
         return web.Response(text="Patreon linked. You can return to Telegram.")
 
