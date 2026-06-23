@@ -965,6 +965,11 @@ async def generate_quiz_json(text: str) -> list[dict]:
 
 Для ordering и find_errors обязательно сделай options.
 Для matching_2 и matching_3_4 options должен быть [].
+Для matching_2 и matching_3_4 весь материал для сопоставления обязательно пиши прямо в question:
+- сначала список 1, 2, 3, 4;
+- затем список а, б, в, г;
+- correct должен быть одной строкой формата "1а 2б 3в 4г" или "1аI 2бII 3вIII 4гIV".
+Нельзя писать только "Сопоставьте..." без самих элементов для сопоставления.
 Для short_answer correct должен состоять из 1 или 2 слов.
 
 Материал:
@@ -2217,6 +2222,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
-    
+    asyncio.run(main())  
