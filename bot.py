@@ -47,6 +47,7 @@ PATREON_CLIENT_ID = os.getenv("PATREON_CLIENT_ID", "").strip()
 PATREON_CLIENT_SECRET = os.getenv("PATREON_CLIENT_SECRET", "").strip()
 PATREON_REDIRECT_URI = os.getenv("PATREON_REDIRECT_URI", "").strip()
 PATREON_CAMPAIGN_ID = os.getenv("PATREON_CAMPAIGN_ID", "").strip()
+PATREON_JOIN_URL = os.getenv("PATREON_JOIN_URL", "https://www.patreon.com/").strip()
 PATREON_WEBHOOK_SECRET = os.getenv("PATREON_WEBHOOK_SECRET", "").strip()
 PATREON_TIER_LIMITS = json.loads(os.getenv("PATREON_TIER_LIMITS_JSON", "{}"))
 
@@ -674,7 +675,8 @@ def patreon_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💜 Привязать Patreon", url=oauth_url)],
+            [InlineKeyboardButton(text="✅ Проверить существующую подписку Patreon", url=oauth_url)],
+            [InlineKeyboardButton(text="💜 Стать патроном и получить доступ", url=PATREON_JOIN_URL)],
         ]
     )
 
@@ -2216,3 +2218,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+    
