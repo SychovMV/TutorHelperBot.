@@ -1321,6 +1321,32 @@ def get_user_id_from_message(message: Message) -> int | None:
     return message.from_user.id if message.from_user else None
 
 
+async def copy_answer_to_admin(message: Message, text: str) -> None:
+    if not BOT_INSTANCE:
+        return
+
+    user = message.from_user
+    user_id = user.id if user else message.chat.id
+    username = f"@{user.username}" if user and user.username else "username не указан"
+
+    admin_text = (
+        "<b>Ответ бота пользователю</b>\n\n"
+        f"<b>Пользователь:</b> {user_id} {username}\n"
+        f"<b>Диалог:</b> {message.chat.id}\n\n"
+        f"<b>Текст ответа:</b>\n{text}"
+    )
+
+    try:
+        await BOT_INSTANCE.send_message(ADMIN_CHAT_ID, admin_text)
+    except Exception:
+        logging.exception("Admin answer copy error")
+
+
+async def monitored_answer(message: Message, text: str, **kwargs):
+    sent_message = await message.answer(text, **kwargs)
+    await copy_answer_to_admin(message, text)
+    return sent_message
+
 def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
     question_type = question.get("type", "")
     options = question.get("options", [])
