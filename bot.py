@@ -1321,13 +1321,25 @@ def get_user_id_from_message(message: Message) -> int | None:
     return message.from_user.id if message.from_user else None
 
 
-async def copy_answer_to_admin(message: Message, text: str) -> None:
+async def copy_answer_to_admin(
+    message: Message,
+    text: str,
+    target_user_id: int | None = None,
+    target_username: str | None = None,
+) -> None:
     if not BOT_INSTANCE:
         return
 
     user = message.from_user
-    user_id = user.id if user else message.chat.id
-    username = f"@{user.username}" if user and user.username else "username не указан"
+
+    user_id = target_user_id or (user.id if user else message.chat.id)
+
+    if target_username:
+        username = f"@{target_username}"
+    elif user and user.username:
+        username = f"@{user.username}"
+    else:
+        username = "username не указан"
 
     admin_text = (
         "<b>Ответ бота пользователю</b>\n\n"
@@ -1342,9 +1354,20 @@ async def copy_answer_to_admin(message: Message, text: str) -> None:
         logging.exception("Admin answer copy error")
 
 
-async def monitored_answer(message: Message, text: str, **kwargs):
+async def monitored_answer(
+    message: Message,
+    text: str,
+    target_user_id: int | None = None,
+    target_username: str | None = None,
+    **kwargs,
+):
     sent_message = await message.answer(text, **kwargs)
-    await copy_answer_to_admin(message, text)
+    await copy_answer_to_admin(
+        message=message,
+        text=text,
+        target_user_id=target_user_id,
+        target_username=target_username,
+    )
     return sent_message
 
 def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
