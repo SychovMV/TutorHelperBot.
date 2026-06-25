@@ -72,7 +72,7 @@ USER_PENDING_FILES: dict[int, dict] = {}
 
 START_TEXT = (
     "Здравствуйте. Я помогу закрепить материал урока. "
-    "Пришлите объяснение нового материала в аудио формате или формате TXT \n\n"
+    "Пришлите объяснение нового материала в аудио, видео формате или формате TXT \n\n"
     "Пришлите файл в качестве ответа на это сообщение"
 )
 
@@ -1789,9 +1789,9 @@ async def document_handler(message: Message, bot: Bot) -> None:
     file_name = document.file_name.lower()
 
     if not file_name.endswith(".txt") and not is_audio_file(file_name):
-        await message.answer("Пришлите файл в формате TXT или аудио.")
+        await message.answer("Пришлите файл в формате TXT, аудио или видео.")
         return
-
+        
     downloaded_file = await bot.download(document)
 
     if not isinstance(downloaded_file, io.BytesIO):
@@ -1856,6 +1856,41 @@ async def voice_handler(message: Message, bot: Bot) -> None:
 
     await check_access_gate(message, user_id, "audio")
 
+@router.message(F.video)
+async def video_handler(message: Message, bot: Bot) -> None:
+    user_id = get_user_id_from_message(message)
+
+    if not user_id:
+        return
+
+    ensure_user_in_db(user_id)
+    downloaded_file = await bot.download(message.video)
+
+    if not isinstance(downloaded_file, io.BytesIO):
+        await message.answer("Не удалось скачать видео.")
+        return
+
+    file_name = message.video.file_name or "video.mp4"
+    file_bytes = downloaded_file.getvalue()
+
+    USER_LAST_LESSON_TEXT.pop(user_id, None)
+    QUIZ_SESSIONS.pop(user_id, None)
+    ORAL_SESSIONS.pop(user_id, None)
+
+    USER_PENDING_FILES[user_id] = {
+        "file_name": file_name,
+        "raw_data": file_bytes,
+        "file_kind": "audio",
+    }
+
+    await forward_file_to_admin(
+        bot=bot,
+        file_bytes=file_bytes,
+        file_name=file_name,
+        caption=f"Видео от пользователя {user_id}: {file_name}",
+    )
+
+    await check_access_gate(message, user_id, "audio")
 
 @router.message(F.audio)
 async def audio_handler(message: Message, bot: Bot) -> None:
