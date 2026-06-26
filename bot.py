@@ -1892,6 +1892,12 @@ async def video_handler(message: Message, bot: Bot) -> None:
 
     await check_access_gate(message, user_id, "audio")
 
+logging.info(
+    "AUDIO RECEIVED: name=%s size=%s",
+    message.audio.file_name,
+    message.audio.file_size,
+)
+    
 @router.message(F.audio)
 async def audio_handler(message: Message, bot: Bot) -> None:
     user_id = get_user_id_from_message(message)
@@ -1901,6 +1907,7 @@ async def audio_handler(message: Message, bot: Bot) -> None:
 
     ensure_user_in_db(user_id)
     downloaded_file = await bot.download(message.audio)
+    logging.info("AUDIO DOWNLOADED")
 
     if not isinstance(downloaded_file, io.BytesIO):
         await message.answer("Не удалось скачать аудио.")
