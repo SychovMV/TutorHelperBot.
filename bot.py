@@ -702,6 +702,16 @@ def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
 async def check_access_gate(message: Message, user_id: int, file_kind: str) -> bool:
     ensure_user_in_db(user_id)
 
+    logging.info(
+        "AUDIO RECEIVED: name=%s size=%s",
+        message.audio.file_name,
+        message.audio.file_size,
+    )
+
+    downloaded_file = await bot.download(message.audio)
+
+    logging.info("AUDIO DOWNLOADED")
+
     if file_kind == "text":
         already_used = await user_has_used_bot_anywhere(user_id)
 
