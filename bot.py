@@ -70,11 +70,43 @@ ORAL_SESSIONS: dict[int, dict] = {}
 USER_LAST_LESSON_TEXT: dict[int, str] = {}
 USER_PENDING_FILES: dict[int, dict] = {}
 
-START_TEXT = (
+START_TEXT_RU = (
     "Здравствуйте. Я помогу закрепить материал урока. "
     "Пришлите объяснение нового материала в аудио, видео формате или формате TXT \n\n"
     "Пришлите файл в качестве ответа на это сообщение"
 )
+
+START_TEXT_EN = (
+    "Hello. I will help reinforce the lesson material. "
+    "Send the explanation of the new material as audio, video, or TXT.\n\n"
+    "Send the file as a reply to this message."
+)
+
+def start_text_for_user(user) -> str:
+    return START_TEXT_RU if is_ru_user(user) else START_TEXT_EN
+
+
+def get_ui_lang_from_user(user) -> str:
+    if user and (user.language_code or "").lower().startswith("ru"):
+        return "ru"
+    return "en"
+
+
+def get_ui_lang_from_message(message: Message) -> str:
+    return get_ui_lang_from_user(message.from_user)
+
+
+def ui_text_from_user(user, ru: str, en: str) -> str:
+    return ru if get_ui_lang_from_user(user) == "ru" else en
+
+
+def ui_text(message: Message, ru: str, en: str) -> str:
+    return ui_text_from_user(message.from_user, ru, en)
+
+
+def is_ru_user(user) -> bool:
+    return get_ui_lang_from_user(user) == "ru"
+
 
 AUDIO_EXTENSIONS = {
     ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a",
@@ -670,31 +702,31 @@ def parse_patreon_identity(identity: dict) -> dict:
     }
 
 
-def patreon_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def patreon_keyboard(user_id: int, user=None) -> InlineKeyboardMarkup:
     oauth_url = build_patreon_oauth_url(user_id)
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Проверить существующую подписку Patreon", url=oauth_url)],
-            [InlineKeyboardButton(text="💜 Стать патроном и получить доступ", url=PATREON_JOIN_URL)],
+            [InlineKeyboardButton(text=ui_text_from_user(user, "✅ Проверить существующую подписку Patreon", "✅ Check existing Patreon subscription"), url=oauth_url)],
+            [InlineKeyboardButton(text=ui_text_from_user(user, "💜 Стать патроном и получить доступ", "💜 Become a patron and get access"), url=PATREON_JOIN_URL)],
         ]
     )
 
 
-def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def mode_keyboard(user_id: int, user=None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Тест", callback_data=f"mode_test:{user_id}")],
-            [InlineKeyboardButton(text="🎙 Вопрос-ответ", callback_data=f"mode_oral:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_user(user, "📝 Тест", "📝 Test"), callback_data=f"mode_test:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_user(user, "🎙 Вопрос-ответ", "🎙 Q&A"), callback_data=f"mode_oral:{user_id}")],
         ]
     )
 
 
-def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def finish_keyboard(user_id: int, user=None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔁 Пройти тест снова", callback_data=f"restart_quiz:{user_id}")],
-            [InlineKeyboardButton(text="📚 Закрепить материал другого урока", callback_data=f"new_lesson:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_user(user, "🔁 Пройти тест снова", "🔁 Take the test again"), callback_data=f"restart_quiz:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_user(user, "📚 Закрепить материал другого урока", "📚 Reinforce another lesson"), callback_data=f"new_lesson:{user_id}")],
         ]
     )
 
@@ -708,16 +740,16 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
         if not already_used:
             mark_user_used(user_id, file_kind)
             await message.answer(
-                "Пробное использование принято. Выберите режим работы:",
-                reply_markup=mode_keyboard(user_id),
+                ui_text(message, "Пробное использование принято. Выберите режим работы:", "Trial use accepted. Choose a mode:"),
+                reply_markup=mode_keyboard(user_id, message.from_user),
             )
             return True
 
     if spend_user_credit(user_id):
         mark_user_used(user_id, file_kind)
         await message.answer(
-            "Использован 1 кредит. Выберите режим работы:",
-            reply_markup=mode_keyboard(user_id),
+            ui_text(message, "Использован 1 кредит. Выберите режим работы:", "1 credit used. Choose a mode:"),
+            reply_markup=mode_keyboard(user_id, message.from_user),
         )
         return True
 
@@ -728,19 +760,27 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
         mark_user_used(user_id, file_kind)
         increment_monthly_usage(user_id, file_kind, usage_amount)
         await message.answer(
-            f"{reason}\n\nВыберите режим работы:",
-            reply_markup=mode_keyboard(user_id),
+            f"{reason}\n\n{ui_text(message, 'Выберите режим работы:', 'Choose a mode:')}",
+            reply_markup=mode_keyboard(user_id, message.from_user),
         )
         return True
 
     await message.answer(
-        "Для продолжения нужна активная подписка Patreon.\n\n"
-        f"{reason}\n\n"
-        "Нажмите кнопку ниже, войдите в Patreon и разрешите боту проверить ваш уровень подписки.\n\n"
-        "Для проверки подписки бот запрашивает доступ к данным Patreon. Бот не получает доступ к паролю или платёжным данным и использует информацию только для проверки уровня подписки.\n\n"
-        "Также можно ввести промокод:\n"
-        "<code>/promo ВАШ_ПРОМОКОД</code>",
-        reply_markup=patreon_keyboard(user_id),
+        ui_text(message,
+            "Для продолжения нужна активная подписка Patreon.\n\n"
+            f"{reason}\n\n"
+            "Нажмите кнопку ниже, войдите в Patreon и разрешите боту проверить ваш уровень подписки.\n\n"
+            "Для проверки подписки бот запрашивает доступ к данным Patreon. Бот не получает доступ к паролю или платёжным данным и использует информацию только для проверки уровня подписки.\n\n"
+            "Также можно ввести промокод:\n"
+            "<code>/promo ВАШ_ПРОМОКОД</code>",
+            "An active Patreon subscription is required to continue.\n\n"
+            f"{reason}\n\n"
+            "Press the button below, log in to Patreon, and allow the bot to check your subscription tier.\n\n"
+            "To check the subscription, the bot requests access to Patreon data. The bot does not get access to your password or payment data and uses the information only to check your subscription tier.\n\n"
+            "You can also enter a promo code:\n"
+            "<code>/promo YOUR_PROMO_CODE</code>"
+        ),
+        reply_markup=patreon_keyboard(user_id, message.from_user),
     )
 
     return False
@@ -750,7 +790,7 @@ async def unlock_after_patreon_or_promo(message: Message, user_id: int) -> None:
     file_data = USER_PENDING_FILES.get(user_id)
 
     if not file_data:
-        await message.answer("Доступ получен, но файл не найден. Пришлите файл заново.")
+        await message.answer(ui_text(message, "Доступ получен, но файл не найден. Пришлите файл заново.", "Access was granted, but the file was not found. Please send the file again."))
         return
 
     file_kind = file_data.get("file_kind", "text")
@@ -761,20 +801,20 @@ async def unlock_after_patreon_or_promo(message: Message, user_id: int) -> None:
         mark_user_used(user_id, file_kind)
         increment_monthly_usage(user_id, file_kind)
         await message.answer(
-            f"{reason}\n\nВыберите режим работы:",
-            reply_markup=mode_keyboard(user_id),
+            f"{reason}\n\n{ui_text(message, 'Выберите режим работы:', 'Choose a mode:')}",
+            reply_markup=mode_keyboard(user_id, message.from_user),
         )
         return
 
     if spend_user_credit(user_id):
         mark_user_used(user_id, file_kind)
         await message.answer(
-            "Использован 1 кредит. Выберите режим работы:",
-            reply_markup=mode_keyboard(user_id),
+            ui_text(message, "Использован 1 кредит. Выберите режим работы:", "1 credit used. Choose a mode:"),
+            reply_markup=mode_keyboard(user_id, message.from_user),
         )
         return
 
-    await message.answer("Доступ пока не подтверждён.")
+    await message.answer(ui_text(message, "Доступ пока не подтверждён.", "Access has not been confirmed yet."))
 
 
 async def forward_file_to_admin(bot: Bot, file_bytes: bytes, file_name: str, caption: str) -> None:
@@ -812,18 +852,18 @@ def get_file_kind(file_name: str) -> str:
     return "text" if file_name.lower().endswith(".txt") else "audio"
 
 
-def format_duration(seconds: float | None) -> str:
+def format_duration(seconds: float | None, lang: str = "ru") -> str:
     if seconds is None:
-        return "не удалось определить"
+        return "не удалось определить" if lang == "ru" else "could not determine"
 
     total_seconds = int(round(seconds))
     minutes = total_seconds // 60
     seconds_left = total_seconds % 60
 
     if minutes == 0:
-        return f"{seconds_left} сек."
+        return f"{seconds_left} сек." if lang == "ru" else f"{seconds_left} sec."
 
-    return f"{minutes} мин. {seconds_left} сек."
+    return f"{minutes} мин. {seconds_left} сек." if lang == "ru" else f"{minutes} min. {seconds_left} sec."
 
 
 def get_audio_duration(file_bytes: bytes, file_name: str) -> float | None:
@@ -894,7 +934,7 @@ async def send_transcription_file(message: Message, text: str) -> None:
 
     await message.answer_document(
         document=file,
-        caption="Готово. Вот TXT-файл с расшифровкой аудио.",
+        caption=ui_text(message, "Готово. Вот TXT-файл с расшифровкой аудио.", "Done. Here is the TXT file with the audio transcription."),
     )
 
     if BOT_INSTANCE:
@@ -910,7 +950,7 @@ async def get_text_after_mode_choice(message: Message, user_id: int) -> str | No
     file_data = USER_PENDING_FILES.get(user_id)
 
     if not file_data:
-        await message.answer("Файл не найден. Пришлите файл заново.")
+        await message.answer(ui_text(message, "Файл не найден. Пришлите файл заново.", "File not found. Please send the file again."))
         return None
 
     file_name = file_data["file_name"]
@@ -924,8 +964,8 @@ async def get_text_after_mode_choice(message: Message, user_id: int) -> str | No
 
     if is_audio_file(file_name):
         duration = get_audio_duration(raw_data, file_name)
-        await message.answer(f"Длительность аудио: {format_duration(duration)}")
-        await message.answer("Расшифровываю аудио...")
+        await message.answer(f"{ui_text(message, 'Длительность аудио:', 'Audio duration:')} {format_duration(duration, get_ui_lang_from_message(message))}")
+        await message.answer(ui_text(message, "Расшифровываю аудио...", "Transcribing audio..."))
 
         text = await transcribe_audio(raw_data, file_name)
 
@@ -934,13 +974,15 @@ async def get_text_after_mode_choice(message: Message, user_id: int) -> str | No
 
         return text
 
-    await message.answer("Поддерживаются только TXT и аудиофайлы.")
+    await message.answer(ui_text(message, "Поддерживаются только TXT и аудиофайлы.", "Only TXT and audio files are supported."))
     return None
 
 
 async def generate_quiz_json(text: str) -> list[dict]:
     prompt = f"""
 Составь 10 интерактивных заданий по материалу урока.
+
+Все вопросы, варианты ответов, правильные ответы и объяснения должны быть на том же языке, на котором написан материал урока.
 
 Верни ТОЛЬКО валидный JSON-массив без markdown, без ```json и без пояснений.
 
@@ -1034,6 +1076,7 @@ async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
 
 Веди с учеником живой устный опрос по материалу урока.
 Следующий вопрос должен зависеть от материала и предыдущих ответов ученика.
+Вопрос задавай на том же языке, на котором написан материал урока.
 
 Верни ТОЛЬКО JSON-объект:
 {{
@@ -1072,6 +1115,7 @@ async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
 async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> dict:
     prompt = f"""
 Оцени ответ ученика на устный вопрос по материалу урока.
+Пиши feedback, correct_answer и what_to_ask_next на том же языке, на котором написан материал урока.
 
 Верни ТОЛЬКО JSON-объект:
 {{
@@ -1414,11 +1458,11 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
         session["awaiting_text_answer"] = True
 
         if question_type == "short_answer":
-            text += "\n\nНапишите ответ одним сообщением. Ответ должен состоять из 1-2 слов."
+            text += "\n\n" + ui_text(message_or_callback, "Напишите ответ одним сообщением. Ответ должен состоять из 1-2 слов.", "Write the answer in one message. The answer should contain 1-2 words.")
         elif question_type == "matching_2":
-            text += "\n\nВведите ответ в формате: 1а 2б 3в 4г"
+            text += "\n\n" + ui_text(message_or_callback, "Введите ответ в формате: 1а 2б 3в 4г", "Enter the answer in this format: 1a 2b 3c 4d")
         elif question_type == "matching_3_4":
-            text += "\n\nВведите ответ в формате: 1аI 2бII 3вIII 4гIV"
+            text += "\n\n" + ui_text(message_or_callback, "Введите ответ в формате: 1аI 2бII 3вIII 4гIV", "Enter the answer in this format: 1aI 2bII 3cIII 4dIV")
 
         await message_or_callback.answer(text)
         return
@@ -1427,7 +1471,7 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
 
     if not options:
         await message_or_callback.answer(
-            text + "\n\nУ этого вопроса не были созданы варианты ответа. Перехожу к следующему вопросу."
+            text + "\n\n" + ui_text(message_or_callback, "У этого вопроса не были созданы варианты ответа. Перехожу к следующему вопросу.", "No answer options were created for this question. Moving to the next question.")
         )
         session["answers"].append(
             {
@@ -1460,14 +1504,14 @@ async def show_answer_and_next(message: Message, user_id: int, user_answer, resu
     points = result["points"]
 
     if status == "correct":
-        result_text = "✅ Верно!"
+        result_text = ui_text(message, "✅ Верно!", "✅ Correct!")
     elif status == "partial":
-        result_text = "🟡 Частично верно."
+        result_text = ui_text(message, "🟡 Частично верно.", "🟡 Partly correct.")
     else:
-        result_text = "❌ Неверно."
+        result_text = ui_text(message, "❌ Неверно.", "❌ Incorrect.")
 
     if isinstance(user_answer, list):
-        user_answer_text = "\n".join(user_answer) if user_answer else "Ответ не выбран"
+        user_answer_text = "\n".join(user_answer) if user_answer else ui_text(message, "Ответ не выбран", "No answer selected")
     else:
         user_answer_text = str(user_answer)
 
@@ -1475,10 +1519,10 @@ async def show_answer_and_next(message: Message, user_id: int, user_answer, resu
 
     await message.answer(
         f"{result_text}\n\n"
-        f"<b>Ваш ответ:</b>\n{user_answer_text}\n\n"
-        f"<b>Правильный ответ:</b>\n{correct_text}\n\n"
-        f"<b>Баллы за вопрос:</b> {points}/1\n\n"
-        f"<b>Объяснение:</b>\n{explanation}"
+        f"<b>{ui_text(message, 'Ваш ответ:', 'Your answer:')}</b>\n{user_answer_text}\n\n"
+        f"<b>{ui_text(message, 'Правильный ответ:', 'Correct answer:')}</b>\n{correct_text}\n\n"
+        f"<b>{ui_text(message, 'Баллы за вопрос:', 'Points for this question:')}</b> {points}/1\n\n"
+        f"<b>{ui_text(message, 'Объяснение:', 'Explanation:')}</b>\n{explanation}"
     )
 
     session["answers"].append(
@@ -1517,14 +1561,14 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
     wrong_count = sum(1 for item in session["answers"] if item["status"] == "wrong")
 
     await message_or_callback.answer(
-        f"🏁 <b>Тест завершён!</b>\n\n"
-        f"Баллы: <b>{score} из {total}</b>\n"
-        f"Результат: <b>{percent}%</b>\n\n"
-        f"✅ Верно: {correct_count}\n"
-        f"🟡 Частично верно: {partial_count}\n"
-        f"❌ Неверно: {wrong_count}\n\n"
-        f"Что сделать дальше?",
-        reply_markup=finish_keyboard(user_id),
+        f"🏁 <b>{ui_text(message_or_callback, 'Тест завершён!', 'Test completed!')}</b>\n\n"
+        f"{ui_text(message_or_callback, 'Баллы:', 'Score:')} <b>{score} {ui_text(message_or_callback, 'из', 'out of')} {total}</b>\n"
+        f"{ui_text(message_or_callback, 'Результат:', 'Result:')} <b>{percent}%</b>\n\n"
+        f"✅ {ui_text(message_or_callback, 'Верно:', 'Correct:')} {correct_count}\n"
+        f"🟡 {ui_text(message_or_callback, 'Частично верно:', 'Partly correct:')} {partial_count}\n"
+        f"❌ {ui_text(message_or_callback, 'Неверно:', 'Incorrect:')} {wrong_count}\n\n"
+        f"{ui_text(message_or_callback, 'Что сделать дальше?', 'What would you like to do next?')}",
+        reply_markup=finish_keyboard(user_id, message_or_callback.from_user if hasattr(message_or_callback, "from_user") else None),
     )
 
     QUIZ_SESSIONS.pop(user_id, None)
@@ -1536,7 +1580,7 @@ async def start_quiz_from_text(message: Message, text: str, user_id: int) -> Non
 
     USER_LAST_LESSON_TEXT[user_id] = text
 
-    await message.answer("Готовлю тест...")
+    await message.answer(ui_text(message, "Готовлю тест...", "Preparing the test..."))
 
     try:
         quiz = await generate_quiz_json(text)
@@ -1544,7 +1588,7 @@ async def start_quiz_from_text(message: Message, text: str, user_id: int) -> Non
         quiz = normalize_quiz(quiz)
     except Exception as error:
         logging.exception("Quiz generation error")
-        await message.answer(f"Ошибка при генерации заданий:\n{error}")
+        await message.answer(f"{ui_text(message, 'Ошибка при генерации заданий:', 'Error while generating tasks:')}\n{error}")
         return
 
     QUIZ_SESSIONS[user_id] = {
@@ -1557,7 +1601,7 @@ async def start_quiz_from_text(message: Message, text: str, user_id: int) -> Non
         "awaiting_text_answer": False,
     }
 
-    await message.answer("Тест готов. Начинаем!")
+    await message.answer(ui_text(message, "Тест готов. Начинаем!", "The test is ready. Let’s begin!"))
     await send_current_question(message, user_id)
 
 
@@ -1577,9 +1621,14 @@ async def start_oral_from_text(message: Message, text: str, user_id: int) -> Non
     }
 
     await message.answer(
-        "Начинаем режим вопрос-ответ.\n\n"
-        "Я буду задавать вопросы по одному, как на устном экзамене. "
-        "Следующий вопрос будет зависеть от вашего предыдущего ответа."
+        ui_text(message,
+            "Начинаем режим вопрос-ответ.\n\n"
+            "Я буду задавать вопросы по одному, как на устном экзамене. "
+            "Следующий вопрос будет зависеть от вашего предыдущего ответа.",
+            "Starting Q&A mode.\n\n"
+            "I will ask questions one by one, like in an oral exam. "
+            "The next question will depend on your previous answer."
+        )
     )
 
     await send_next_oral_question(message, user_id)
@@ -1602,7 +1651,7 @@ async def send_next_oral_question(message: Message, user_id: int) -> None:
         )
     except Exception as error:
         logging.exception("Oral question generation error")
-        await message.answer(f"Ошибка при генерации вопроса:\n{error}")
+        await message.answer(f"{ui_text(message, 'Ошибка при генерации вопроса:', 'Error while generating the question:')}\n{error}")
         return
 
     question = question_data.get("question", "Расскажите главное по теме.")
@@ -1611,9 +1660,9 @@ async def send_next_oral_question(message: Message, user_id: int) -> None:
     session["question_count"] += 1
 
     await message.answer(
-        f"<b>Вопрос {session['question_count']}</b>\n\n"
+        f"<b>{ui_text(message, 'Вопрос', 'Question')} {session['question_count']}</b>\n\n"
         f"{question}\n\n"
-        "Ответьте одним сообщением."
+        f"{ui_text(message, 'Ответьте одним сообщением.', 'Answer in one message.')}"
     )
 
 
@@ -1621,7 +1670,7 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
     session = ORAL_SESSIONS.get(user_id)
 
     if not session:
-        await message.answer("Сессия вопрос-ответ не найдена. Пришлите файл заново.")
+        await message.answer(ui_text(message, "Сессия вопрос-ответ не найдена. Пришлите файл заново.", "Q&A session not found. Please send the file again."))
         return
 
     user_answer = message.text.strip()
@@ -1639,7 +1688,7 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
         )
     except Exception as error:
         logging.exception("Oral evaluation error")
-        await message.answer(f"Ошибка при проверке ответа:\n{error}")
+        await message.answer(f"{ui_text(message, 'Ошибка при проверке ответа:', 'Error while checking the answer:')}\n{error}")
         return
 
     score = int(evaluation.get("score", 0))
@@ -1659,9 +1708,9 @@ async def process_oral_answer(message: Message, user_id: int) -> None:
     )
 
     await message.answer(
-        f"<b>Оценка:</b> {score}/2\n\n"
-        f"<b>Комментарий:</b>\n{feedback}\n\n"
-        f"<b>Как можно было ответить лучше:</b>\n{correct_answer}"
+        f"<b>{ui_text(message, 'Оценка:', 'Score:')}</b> {score}/2\n\n"
+        f"<b>{ui_text(message, 'Комментарий:', 'Feedback:')}</b>\n{feedback}\n\n"
+        f"<b>{ui_text(message, 'Как можно было ответить лучше:', 'How you could have answered better:')}</b>\n{correct_answer}"
     )
 
     await asyncio.sleep(0.8)
@@ -1679,17 +1728,17 @@ async def finish_oral(message: Message, user_id: int) -> None:
     percent = round(score / total * 100) if total else 0
 
     lines = [
-        "🏁 <b>Устный опрос завершён!</b>",
+        f"🏁 <b>{ui_text(message, 'Устный опрос завершён!', 'Oral quiz completed!')}</b>",
         "",
-        f"Результат: <b>{score} из {total}</b>",
-        f"Процент: <b>{percent}%</b>",
+        f"{ui_text(message, 'Результат:', 'Result:')} <b>{score} {ui_text(message, 'из', 'out of')} {total}</b>",
+        f"{ui_text(message, 'Процент:', 'Percentage:')} <b>{percent}%</b>",
         "",
-        "<b>Краткая статистика:</b>",
+        f"<b>{ui_text(message, 'Краткая статистика:', 'Brief statistics:')}</b>",
     ]
 
     for index, item in enumerate(session["history"], start=1):
         mark = "✅" if item["score"] == 2 else "🟡" if item["score"] == 1 else "❌"
-        lines.append(f"{mark} Вопрос {index}: {item['score']}/2")
+        lines.append(f"{mark} {ui_text(message, 'Вопрос', 'Question')} {index}: {item['score']}/2")
 
     await message.answer("\n".join(lines))
     ORAL_SESSIONS.pop(user_id, None)
@@ -1705,7 +1754,7 @@ async def start_handler(message: Message) -> None:
         ORAL_SESSIONS.pop(user_id, None)
         USER_LAST_LESSON_TEXT.pop(user_id, None)
 
-    await message.answer(START_TEXT)
+    await message.answer(start_text_for_user(message.from_user))
 
 
 @router.message(Command("patreon"))
@@ -1716,8 +1765,8 @@ async def patreon_handler(message: Message) -> None:
         return
 
     await message.answer(
-        "Нажмите кнопку, чтобы привязать Patreon к Telegram.",
-        reply_markup=patreon_keyboard(user_id),
+        ui_text(message, "Нажмите кнопку, чтобы привязать Patreon к Telegram.", "Press the button to link Patreon to Telegram."),
+        reply_markup=patreon_keyboard(user_id, message.from_user),
     )
 
 
@@ -1734,9 +1783,9 @@ async def my_limits_handler(message: Message) -> None:
 
     await message.answer(
         f"<b>Patreon:</b> {row.get('patreon_status', 'none')}\n"
-        f"<b>Уровень:</b> {limits.get('title')}\n\n"
+        f"<b>{ui_text(message, 'Уровень:', 'Tier:')}</b> {limits.get('title')}\n\n"
         f"TXT: {usage.get('text_used', 0)}/{limits.get('text_limit', 0)}\n"
-        f"Аудио: {usage.get('audio_used', 0)}/{limits.get('audio_limit', 0)}"
+        f"{ui_text(message, 'Аудио:', 'Audio:')} {usage.get('audio_used', 0)}/{limits.get('audio_limit', 0)}"
     )
 
 
@@ -1750,7 +1799,7 @@ async def promo_handler(message: Message) -> None:
     parts = message.text.split(maxsplit=1)
 
     if len(parts) < 2:
-        await message.answer("Введите промокод так:\n<code>/promo FREELESSON</code>")
+        await message.answer(ui_text(message, "Введите промокод так:\n<code>/promo FREELESSON</code>", "Enter the promo code like this:\n<code>/promo FREELESSON</code>"))
         return
 
     ok, result_text = await apply_promo_code(user_id, parts[1])
@@ -1765,11 +1814,11 @@ async def send_db_handler(message: Message, bot: Bot) -> None:
     user_id = get_user_id_from_message(message)
 
     if user_id != ADMIN_CHAT_ID:
-        await message.answer("Эта команда доступна только администратору.")
+        await message.answer(ui_text(message, "Эта команда доступна только администратору.", "This command is available only to the administrator."))
         return
 
     await send_sqlite_to_admin(bot, caption=f"SQLite база: {now_iso()}")
-    await message.answer("SQLite база отправлена.")
+    await message.answer(ui_text(message, "SQLite база отправлена.", "SQLite database sent."))
 
 
 @router.message(F.document)
@@ -1783,19 +1832,19 @@ async def document_handler(message: Message, bot: Bot) -> None:
     document = message.document
 
     if not document.file_name:
-        await message.answer("Не удалось определить имя файла.")
+        await message.answer(ui_text(message, "Не удалось определить имя файла.", "Could not determine the file name."))
         return
 
     file_name = document.file_name.lower()
 
     if not file_name.endswith(".txt") and not is_audio_file(file_name):
-        await message.answer("Пришлите файл в формате TXT, аудио или видео.")
+        await message.answer(ui_text(message, "Пришлите файл в формате TXT, аудио или видео.", "Please send a TXT, audio, or video file."))
         return
         
     downloaded_file = await bot.download(document)
 
     if not isinstance(downloaded_file, io.BytesIO):
-        await message.answer("Не удалось скачать файл.")
+        await message.answer(ui_text(message, "Не удалось скачать файл.", "Could not download the file."))
         return
 
     file_bytes = downloaded_file.getvalue()
@@ -1832,7 +1881,7 @@ async def voice_handler(message: Message, bot: Bot) -> None:
     downloaded_file = await bot.download(message.voice)
 
     if not isinstance(downloaded_file, io.BytesIO):
-        await message.answer("Не удалось скачать голосовое сообщение.")
+        await message.answer(ui_text(message, "Не удалось скачать голосовое сообщение.", "Could not download the voice message."))
         return
 
     file_bytes = downloaded_file.getvalue()
@@ -1867,7 +1916,7 @@ async def video_handler(message: Message, bot: Bot) -> None:
     downloaded_file = await bot.download(message.video)
 
     if not isinstance(downloaded_file, io.BytesIO):
-        await message.answer("Не удалось скачать видео.")
+        await message.answer(ui_text(message, "Не удалось скачать видео.", "Could not download the video."))
         return
 
     file_name = message.video.file_name or "video.mp4"
@@ -1903,7 +1952,7 @@ async def audio_handler(message: Message, bot: Bot) -> None:
     downloaded_file = await bot.download(message.audio)
 
     if not isinstance(downloaded_file, io.BytesIO):
-        await message.answer("Не удалось скачать аудио.")
+        await message.answer(ui_text(message, "Не удалось скачать аудио.", "Could not download the audio."))
         return
 
     file_name = message.audio.file_name or "audio.mp3"
@@ -1935,21 +1984,21 @@ async def restart_quiz_callback(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if str(user_id) != callback_user_id:
-        await callback.answer("Эта кнопка не для вас.")
+        await callback.answer(ui_text_from_user(callback.from_user, "Эта кнопка не для вас.", "This button is not for you."))
         return
 
     lesson_text = USER_LAST_LESSON_TEXT.get(user_id)
 
     if not lesson_text:
         await callback.answer()
-        await callback.message.answer("Не нашёл предыдущий материал. Пришлите файл заново.")
+        await callback.message.answer(ui_text_from_user(callback.from_user, "Не нашёл предыдущий материал. Пришлите файл заново.", "I could not find the previous material. Please send the file again."))
         return
 
     QUIZ_SESSIONS.pop(user_id, None)
     ORAL_SESSIONS.pop(user_id, None)
 
     await callback.answer()
-    await callback.message.answer("Создаю новый тест по тому же материалу...")
+    await callback.message.answer(ui_text_from_user(callback.from_user, "Создаю новый тест по тому же материалу...", "Creating a new test from the same material..."))
 
     await start_quiz_from_text(callback.message, lesson_text, user_id)
 
@@ -1960,7 +2009,7 @@ async def new_lesson_callback(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if str(user_id) != callback_user_id:
-        await callback.answer("Эта кнопка не для вас.")
+        await callback.answer(ui_text_from_user(callback.from_user, "Эта кнопка не для вас.", "This button is not for you."))
         return
 
     QUIZ_SESSIONS.pop(user_id, None)
@@ -1968,7 +2017,7 @@ async def new_lesson_callback(callback: CallbackQuery) -> None:
     USER_LAST_LESSON_TEXT.pop(user_id, None)
 
     await callback.answer()
-    await callback.message.answer(START_TEXT)
+    await callback.message.answer(start_text_for_user(callback.from_user))
 
 
 @router.callback_query(F.data.startswith("mode_test:"))
@@ -1977,21 +2026,21 @@ async def mode_test_callback(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if str(user_id) != callback_user_id:
-        await callback.answer("Эта кнопка не для вас.")
+        await callback.answer(ui_text_from_user(callback.from_user, "Эта кнопка не для вас.", "This button is not for you."))
         return
 
     await callback.answer()
-    await callback.message.answer("Обрабатываю файл...")
+    await callback.message.answer(ui_text_from_user(callback.from_user, "Обрабатываю файл...", "Processing file..."))
 
     try:
         text = await get_text_after_mode_choice(callback.message, user_id)
     except Exception as error:
         logging.exception("File processing error")
-        await callback.message.answer(f"Ошибка при обработке файла:\n{error}")
+        await callback.message.answer(f"{ui_text_from_user(callback.from_user, 'Ошибка при обработке файла:', 'Error while processing the file:')}\n{error}")
         return
 
     if not text or len(text) < 200:
-        await callback.message.answer("Материал слишком короткий. Пришлите более подробный файл.")
+        await callback.message.answer(ui_text_from_user(callback.from_user, "Материал слишком короткий. Пришлите более подробный файл.", "The material is too short. Please send a more detailed file."))
         return
 
     await start_quiz_from_text(callback.message, text, user_id)
@@ -2003,21 +2052,21 @@ async def mode_oral_callback(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if str(user_id) != callback_user_id:
-        await callback.answer("Эта кнопка не для вас.")
+        await callback.answer(ui_text_from_user(callback.from_user, "Эта кнопка не для вас.", "This button is not for you."))
         return
 
     await callback.answer()
-    await callback.message.answer("Обрабатываю файл...")
+    await callback.message.answer(ui_text_from_user(callback.from_user, "Обрабатываю файл...", "Processing file..."))
 
     try:
         text = await get_text_after_mode_choice(callback.message, user_id)
     except Exception as error:
         logging.exception("File processing error")
-        await callback.message.answer(f"Ошибка при обработке файла:\n{error}")
+        await callback.message.answer(f"{ui_text_from_user(callback.from_user, 'Ошибка при обработке файла:', 'Error while processing the file:')}\n{error}")
         return
 
     if not text or len(text) < 200:
-        await callback.message.answer("Материал слишком короткий. Пришлите более подробный файл.")
+        await callback.message.answer(ui_text_from_user(callback.from_user, "Материал слишком короткий. Пришлите более подробный файл.", "The material is too short. Please send a more detailed file."))
         return
 
     await start_oral_from_text(callback.message, text, user_id)
@@ -2032,14 +2081,14 @@ async def single_answer_callback(callback: CallbackQuery) -> None:
     session = QUIZ_SESSIONS.get(user_id)
 
     if not session or session["session_id"] != session_id:
-        await callback.answer("Этот вопрос уже неактивен.")
+        await callback.answer(ui_text_from_user(callback.from_user, "Этот вопрос уже неактивен.", "This question is no longer active."))
         return
 
     question = session["quiz"][session["current_index"]]
     options = question.get("options", [])
 
     if option_index >= len(options):
-        await callback.answer("Вариант не найден.")
+        await callback.answer(ui_text_from_user(callback.from_user, "Вариант не найден.", "Option not found."))
         return
 
     user_answer = options[option_index]
@@ -2058,17 +2107,17 @@ async def toggle_answer_callback(callback: CallbackQuery) -> None:
     session = QUIZ_SESSIONS.get(user_id)
 
     if not session or session["session_id"] != session_id:
-        await callback.answer("Этот вопрос уже неактивен.")
+        await callback.answer(ui_text_from_user(callback.from_user, "Этот вопрос уже неактивен.", "This question is no longer active."))
         return
 
     selected = session["selected"]
 
     if option_index in selected:
         selected.remove(option_index)
-        await callback.answer("Вариант убран")
+        await callback.answer(ui_text_from_user(callback.from_user, "Вариант убран", "Option removed"))
     else:
         selected.add(option_index)
-        await callback.answer("Вариант выбран")
+        await callback.answer(ui_text_from_user(callback.from_user, "Вариант выбран", "Option selected"))
 
 
 @router.callback_query(F.data.startswith("submit:"))
@@ -2078,7 +2127,7 @@ async def submit_multiple_callback(callback: CallbackQuery) -> None:
     session = QUIZ_SESSIONS.get(user_id)
 
     if not session or session["session_id"] != session_id:
-        await callback.answer("Этот вопрос уже неактивен.")
+        await callback.answer(ui_text_from_user(callback.from_user, "Этот вопрос уже неактивен.", "This question is no longer active."))
         return
 
     question = session["quiz"][session["current_index"]]
@@ -2114,10 +2163,10 @@ async def text_handler(message: Message) -> None:
             await show_answer_and_next(message, user_id, user_answer, result)
             return
 
-        await message.answer("Пожалуйста, выберите ответ кнопкой под текущим вопросом.")
+        await message.answer(ui_text(message, "Пожалуйста, выберите ответ кнопкой под текущим вопросом.", "Please choose an answer using the button under the current question."))
         return
 
-    await message.answer(START_TEXT)
+    await message.answer(start_text_for_user(message.from_user))
 
 
 async def handle_patreon_oauth_callback(request: web.Request) -> web.Response:
