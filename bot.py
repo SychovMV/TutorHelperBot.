@@ -1754,6 +1754,13 @@ async def start_handler(message: Message) -> None:
         ORAL_SESSIONS.pop(user_id, None)
         USER_LAST_LESSON_TEXT.pop(user_id, None)
 
+    logging.info(
+        "USER LANGUAGE: user_id=%s username=%s language_code=%s",
+        message.from_user.id if message.from_user else None,
+        message.from_user.username if message.from_user else None,
+        message.from_user.language_code if message.from_user else None,
+    )
+
     await message.answer(start_text_for_user(message.from_user))
 
 
