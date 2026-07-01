@@ -82,30 +82,92 @@ START_TEXT_EN = (
     "Send the file as a reply to this message."
 )
 
-def start_text_for_user(user) -> str:
-    return START_TEXT_RU if is_ru_user(user) else START_TEXT_EN
+def get_chat_lang(chat_id: int | str | None) -> str:
+    if chat_id is None:
+        return "en"
 
+    try:
+        chat_id_int = int(chat_id)
+    except Exception:
+        return "en"
 
-def get_ui_lang_from_user(user) -> str:
-    if user and (user.language_code or "").lower().startswith("ru"):
+    try:
+        with sqlite3.connect(SQLITE_PATH) as conn:
+            row = conn.execute(
+                "SELECT language FROM chat_settings WHERE chat_id = ?",
+                (chat_id_int,),
+            ).fetchone()
+    except Exception:
+        return "en"
+
+    if row and str(row[0]).lower() == "ru":
         return "ru"
+
     return "en"
 
 
+def set_chat_lang(chat_id: int | str | None, language: str) -> None:
+    if chat_id is None:
+        return
+
+    try:
+        chat_id_int = int(chat_id)
+    except Exception:
+        return
+
+    language = "ru" if str(language).lower().startswith("ru") else "en"
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_settings (chat_id, language, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                language = excluded.language,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id_int, language, now_iso()),
+        )
+        conn.commit()
+
+
 def get_ui_lang_from_message(message: Message) -> str:
-    return get_ui_lang_from_user(message.from_user)
+    return get_chat_lang(message.chat.id)
+
+
+def ui_text_from_chat(chat_id: int | str | None, ru: str, en: str) -> str:
+    return ru if get_chat_lang(chat_id) == "ru" else en
 
 
 def ui_text_from_user(user, ru: str, en: str) -> str:
-    return ru if get_ui_lang_from_user(user) == "ru" else en
+    return en
 
 
 def ui_text(message: Message, ru: str, en: str) -> str:
-    return ui_text_from_user(message.from_user, ru, en)
+    return ui_text_from_chat(message.chat.id, ru, en)
+
+
+def start_text_for_chat(chat_id: int | str | None) -> str:
+    return ui_text_from_chat(chat_id, START_TEXT_RU, START_TEXT_EN)
+
+
+def start_text_for_user(user) -> str:
+    return START_TEXT_EN
 
 
 def is_ru_user(user) -> bool:
-    return get_ui_lang_from_user(user) == "ru"
+    return False
+
+
+def language_keyboard(chat_id: int | str | None = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=ui_text_from_chat(chat_id, "🌐 Сменить язык", "🌐 Change language"),
+                callback_data="switch_language"
+            )]
+        ]
+    )
 
 
 AUDIO_EXTENSIONS = {
@@ -181,6 +243,16 @@ def init_db() -> None:
                 credits INTEGER DEFAULT 1,
                 used_at TEXT,
                 UNIQUE(telegram_id, code)
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_settings (
+                chat_id INTEGER PRIMARY KEY,
+                language TEXT DEFAULT 'en',
+                updated_at TEXT
             )
             """
         )
@@ -702,31 +774,34 @@ def parse_patreon_identity(identity: dict) -> dict:
     }
 
 
-def patreon_keyboard(user_id: int, user=None) -> InlineKeyboardMarkup:
+def patreon_keyboard(user_id: int, chat_id=None) -> InlineKeyboardMarkup:
     oauth_url = build_patreon_oauth_url(user_id)
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=ui_text_from_user(user, "✅ Проверить существующую подписку Patreon", "✅ Check existing Patreon subscription"), url=oauth_url)],
-            [InlineKeyboardButton(text=ui_text_from_user(user, "💜 Стать патроном и получить доступ", "💜 Become a patron and get access"), url=PATREON_JOIN_URL)],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "✅ Проверить существующую подписку Patreon", "✅ Check existing Patreon subscription"), url=oauth_url)],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "💜 Стать патроном и получить доступ", "💜 Become a patron and get access"), url=PATREON_JOIN_URL)],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🌐 Сменить язык", "🌐 Change language"), callback_data="switch_language")],
         ]
     )
 
 
-def mode_keyboard(user_id: int, user=None) -> InlineKeyboardMarkup:
+def mode_keyboard(user_id: int, chat_id=None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=ui_text_from_user(user, "📝 Тест", "📝 Test"), callback_data=f"mode_test:{user_id}")],
-            [InlineKeyboardButton(text=ui_text_from_user(user, "🎙 Вопрос-ответ", "🎙 Q&A"), callback_data=f"mode_oral:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "📝 Тест", "📝 Test"), callback_data=f"mode_test:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🎙 Вопрос-ответ", "🎙 Q&A"), callback_data=f"mode_oral:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🌐 Сменить язык", "🌐 Change language"), callback_data="switch_language")],
         ]
     )
 
 
-def finish_keyboard(user_id: int, user=None) -> InlineKeyboardMarkup:
+def finish_keyboard(user_id: int, chat_id=None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=ui_text_from_user(user, "🔁 Пройти тест снова", "🔁 Take the test again"), callback_data=f"restart_quiz:{user_id}")],
-            [InlineKeyboardButton(text=ui_text_from_user(user, "📚 Закрепить материал другого урока", "📚 Reinforce another lesson"), callback_data=f"new_lesson:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🔁 Пройти тест снова", "🔁 Take the test again"), callback_data=f"restart_quiz:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "📚 Закрепить материал другого урока", "📚 Reinforce another lesson"), callback_data=f"new_lesson:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🌐 Сменить язык", "🌐 Change language"), callback_data="switch_language")],
         ]
     )
 
@@ -741,7 +816,7 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
             mark_user_used(user_id, file_kind)
             await message.answer(
                 ui_text(message, "Пробное использование принято. Выберите режим работы:", "Trial use accepted. Choose a mode:"),
-                reply_markup=mode_keyboard(user_id, message.from_user),
+                reply_markup=mode_keyboard(user_id, message.chat.id),
             )
             return True
 
@@ -749,7 +824,7 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
         mark_user_used(user_id, file_kind)
         await message.answer(
             ui_text(message, "Использован 1 кредит. Выберите режим работы:", "1 credit used. Choose a mode:"),
-            reply_markup=mode_keyboard(user_id, message.from_user),
+            reply_markup=mode_keyboard(user_id, message.chat.id),
         )
         return True
 
@@ -761,7 +836,7 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
         increment_monthly_usage(user_id, file_kind, usage_amount)
         await message.answer(
             f"{reason}\n\n{ui_text(message, 'Выберите режим работы:', 'Choose a mode:')}",
-            reply_markup=mode_keyboard(user_id, message.from_user),
+            reply_markup=mode_keyboard(user_id, message.chat.id),
         )
         return True
 
@@ -780,7 +855,7 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
             "You can also enter a promo code:\n"
             "<code>/promo YOUR_PROMO_CODE</code>"
         ),
-        reply_markup=patreon_keyboard(user_id, message.from_user),
+        reply_markup=patreon_keyboard(user_id, message.chat.id),
     )
 
     return False
@@ -802,7 +877,7 @@ async def unlock_after_patreon_or_promo(message: Message, user_id: int) -> None:
         increment_monthly_usage(user_id, file_kind)
         await message.answer(
             f"{reason}\n\n{ui_text(message, 'Выберите режим работы:', 'Choose a mode:')}",
-            reply_markup=mode_keyboard(user_id, message.from_user),
+            reply_markup=mode_keyboard(user_id, message.chat.id),
         )
         return
 
@@ -810,7 +885,7 @@ async def unlock_after_patreon_or_promo(message: Message, user_id: int) -> None:
         mark_user_used(user_id, file_kind)
         await message.answer(
             ui_text(message, "Использован 1 кредит. Выберите режим работы:", "1 credit used. Choose a mode:"),
-            reply_markup=mode_keyboard(user_id, message.from_user),
+            reply_markup=mode_keyboard(user_id, message.chat.id),
         )
         return
 
@@ -1568,7 +1643,7 @@ async def finish_quiz(message_or_callback, user_id: int) -> None:
         f"🟡 {ui_text(message_or_callback, 'Частично верно:', 'Partly correct:')} {partial_count}\n"
         f"❌ {ui_text(message_or_callback, 'Неверно:', 'Incorrect:')} {wrong_count}\n\n"
         f"{ui_text(message_or_callback, 'Что сделать дальше?', 'What would you like to do next?')}",
-        reply_markup=finish_keyboard(user_id, message_or_callback.from_user if hasattr(message_or_callback, "from_user") else None),
+        reply_markup=finish_keyboard(user_id, message_or_callback.chat.id if hasattr(message_or_callback, "chat") else None),
     )
 
     QUIZ_SESSIONS.pop(user_id, None)
@@ -1761,7 +1836,10 @@ async def start_handler(message: Message) -> None:
         message.from_user.language_code if message.from_user else None,
     )
 
-    await message.answer(start_text_for_user(message.from_user))
+    await message.answer(
+        start_text_for_chat(message.chat.id),
+        reply_markup=language_keyboard(message.chat.id),
+    )
 
 
 @router.message(Command("patreon"))
@@ -1773,7 +1851,7 @@ async def patreon_handler(message: Message) -> None:
 
     await message.answer(
         ui_text(message, "Нажмите кнопку, чтобы привязать Patreon к Telegram.", "Press the button to link Patreon to Telegram."),
-        reply_markup=patreon_keyboard(user_id, message.from_user),
+        reply_markup=patreon_keyboard(user_id, message.chat.id),
     )
 
 
@@ -1985,27 +2063,60 @@ async def audio_handler(message: Message, bot: Bot) -> None:
     await check_access_gate(message, user_id, "audio")
 
 
+
+@router.callback_query(F.data == "switch_language")
+async def switch_language_callback(callback: CallbackQuery) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
+
+    chat_id = callback.message.chat.id
+    current_lang = get_chat_lang(chat_id)
+    new_lang = "ru" if current_lang == "en" else "en"
+
+    set_chat_lang(chat_id, new_lang)
+
+    if new_lang == "ru":
+        text = (
+            "Язык этого чата переключён на русский.\n\n"
+            "Теперь системные сообщения бота будут на русском. "
+            "Вопросы по уроку всё равно будут создаваться на языке исходного материала."
+        )
+    else:
+        text = (
+            "This chat language has been switched to English.\n\n"
+            "System messages will now be in English. "
+            "Lesson questions will still be created in the language of the source material."
+        )
+
+    await callback.answer()
+    await callback.message.answer(
+        text,
+        reply_markup=language_keyboard(chat_id),
+    )
+
+
 @router.callback_query(F.data.startswith("restart_quiz:"))
 async def restart_quiz_callback(callback: CallbackQuery) -> None:
     _, callback_user_id = callback.data.split(":")
     user_id = callback.from_user.id
 
     if str(user_id) != callback_user_id:
-        await callback.answer(ui_text_from_user(callback.from_user, "Эта кнопка не для вас.", "This button is not for you."))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Эта кнопка не для вас.", "This button is not for you."))
         return
 
     lesson_text = USER_LAST_LESSON_TEXT.get(user_id)
 
     if not lesson_text:
         await callback.answer()
-        await callback.message.answer(ui_text_from_user(callback.from_user, "Не нашёл предыдущий материал. Пришлите файл заново.", "I could not find the previous material. Please send the file again."))
+        await callback.message.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Не нашёл предыдущий материал. Пришлите файл заново.", "I could not find the previous material. Please send the file again."))
         return
 
     QUIZ_SESSIONS.pop(user_id, None)
     ORAL_SESSIONS.pop(user_id, None)
 
     await callback.answer()
-    await callback.message.answer(ui_text_from_user(callback.from_user, "Создаю новый тест по тому же материалу...", "Creating a new test from the same material..."))
+    await callback.message.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Создаю новый тест по тому же материалу...", "Creating a new test from the same material..."))
 
     await start_quiz_from_text(callback.message, lesson_text, user_id)
 
@@ -2016,7 +2127,7 @@ async def new_lesson_callback(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if str(user_id) != callback_user_id:
-        await callback.answer(ui_text_from_user(callback.from_user, "Эта кнопка не для вас.", "This button is not for you."))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Эта кнопка не для вас.", "This button is not for you."))
         return
 
     QUIZ_SESSIONS.pop(user_id, None)
@@ -2024,7 +2135,10 @@ async def new_lesson_callback(callback: CallbackQuery) -> None:
     USER_LAST_LESSON_TEXT.pop(user_id, None)
 
     await callback.answer()
-    await callback.message.answer(start_text_for_user(callback.from_user))
+    await callback.message.answer(
+        start_text_for_chat(callback.message.chat.id),
+        reply_markup=language_keyboard(callback.message.chat.id),
+    )
 
 
 @router.callback_query(F.data.startswith("mode_test:"))
@@ -2033,21 +2147,21 @@ async def mode_test_callback(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if str(user_id) != callback_user_id:
-        await callback.answer(ui_text_from_user(callback.from_user, "Эта кнопка не для вас.", "This button is not for you."))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Эта кнопка не для вас.", "This button is not for you."))
         return
 
     await callback.answer()
-    await callback.message.answer(ui_text_from_user(callback.from_user, "Обрабатываю файл...", "Processing file..."))
+    await callback.message.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Обрабатываю файл...", "Processing file..."))
 
     try:
         text = await get_text_after_mode_choice(callback.message, user_id)
     except Exception as error:
         logging.exception("File processing error")
-        await callback.message.answer(f"{ui_text_from_user(callback.from_user, 'Ошибка при обработке файла:', 'Error while processing the file:')}\n{error}")
+        await callback.message.answer(f"{ui_text_from_chat(callback.message.chat.id if callback.message else None, 'Ошибка при обработке файла:', 'Error while processing the file:')}\n{error}")
         return
 
     if not text or len(text) < 200:
-        await callback.message.answer(ui_text_from_user(callback.from_user, "Материал слишком короткий. Пришлите более подробный файл.", "The material is too short. Please send a more detailed file."))
+        await callback.message.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Материал слишком короткий. Пришлите более подробный файл.", "The material is too short. Please send a more detailed file."))
         return
 
     await start_quiz_from_text(callback.message, text, user_id)
@@ -2059,21 +2173,21 @@ async def mode_oral_callback(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     if str(user_id) != callback_user_id:
-        await callback.answer(ui_text_from_user(callback.from_user, "Эта кнопка не для вас.", "This button is not for you."))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Эта кнопка не для вас.", "This button is not for you."))
         return
 
     await callback.answer()
-    await callback.message.answer(ui_text_from_user(callback.from_user, "Обрабатываю файл...", "Processing file..."))
+    await callback.message.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Обрабатываю файл...", "Processing file..."))
 
     try:
         text = await get_text_after_mode_choice(callback.message, user_id)
     except Exception as error:
         logging.exception("File processing error")
-        await callback.message.answer(f"{ui_text_from_user(callback.from_user, 'Ошибка при обработке файла:', 'Error while processing the file:')}\n{error}")
+        await callback.message.answer(f"{ui_text_from_chat(callback.message.chat.id if callback.message else None, 'Ошибка при обработке файла:', 'Error while processing the file:')}\n{error}")
         return
 
     if not text or len(text) < 200:
-        await callback.message.answer(ui_text_from_user(callback.from_user, "Материал слишком короткий. Пришлите более подробный файл.", "The material is too short. Please send a more detailed file."))
+        await callback.message.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Материал слишком короткий. Пришлите более подробный файл.", "The material is too short. Please send a more detailed file."))
         return
 
     await start_oral_from_text(callback.message, text, user_id)
@@ -2088,14 +2202,14 @@ async def single_answer_callback(callback: CallbackQuery) -> None:
     session = QUIZ_SESSIONS.get(user_id)
 
     if not session or session["session_id"] != session_id:
-        await callback.answer(ui_text_from_user(callback.from_user, "Этот вопрос уже неактивен.", "This question is no longer active."))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Этот вопрос уже неактивен.", "This question is no longer active."))
         return
 
     question = session["quiz"][session["current_index"]]
     options = question.get("options", [])
 
     if option_index >= len(options):
-        await callback.answer(ui_text_from_user(callback.from_user, "Вариант не найден.", "Option not found."))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Вариант не найден.", "Option not found."))
         return
 
     user_answer = options[option_index]
@@ -2114,17 +2228,17 @@ async def toggle_answer_callback(callback: CallbackQuery) -> None:
     session = QUIZ_SESSIONS.get(user_id)
 
     if not session or session["session_id"] != session_id:
-        await callback.answer(ui_text_from_user(callback.from_user, "Этот вопрос уже неактивен.", "This question is no longer active."))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Этот вопрос уже неактивен.", "This question is no longer active."))
         return
 
     selected = session["selected"]
 
     if option_index in selected:
         selected.remove(option_index)
-        await callback.answer(ui_text_from_user(callback.from_user, "Вариант убран", "Option removed"))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Вариант убран", "Option removed"))
     else:
         selected.add(option_index)
-        await callback.answer(ui_text_from_user(callback.from_user, "Вариант выбран", "Option selected"))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Вариант выбран", "Option selected"))
 
 
 @router.callback_query(F.data.startswith("submit:"))
@@ -2134,7 +2248,7 @@ async def submit_multiple_callback(callback: CallbackQuery) -> None:
     session = QUIZ_SESSIONS.get(user_id)
 
     if not session or session["session_id"] != session_id:
-        await callback.answer(ui_text_from_user(callback.from_user, "Этот вопрос уже неактивен.", "This question is no longer active."))
+        await callback.answer(ui_text_from_chat(callback.message.chat.id if callback.message else None, "Этот вопрос уже неактивен.", "This question is no longer active."))
         return
 
     question = session["quiz"][session["current_index"]]
@@ -2173,7 +2287,10 @@ async def text_handler(message: Message) -> None:
         await message.answer(ui_text(message, "Пожалуйста, выберите ответ кнопкой под текущим вопросом.", "Please choose an answer using the button under the current question."))
         return
 
-    await message.answer(start_text_for_user(message.from_user))
+    await message.answer(
+        start_text_for_chat(message.chat.id),
+        reply_markup=language_keyboard(message.chat.id),
+    )
 
 
 async def handle_patreon_oauth_callback(request: web.Request) -> web.Response:
@@ -2215,7 +2332,7 @@ async def handle_patreon_oauth_callback(request: web.Request) -> web.Response:
             try:
                 await BOT_INSTANCE.send_message(
                     telegram_id,
-                    "Patreon привязан. Теперь пришлите файл или продолжите с уже загруженным файлом.",
+                    ui_text_from_chat(telegram_id, "Patreon привязан. Теперь пришлите файл или продолжите с уже загруженным файлом.", "Patreon is linked. Now send a file or continue with the file you already uploaded."),
                 )
             except Exception:
                 logging.exception("Telegram success notification error")
@@ -2231,7 +2348,7 @@ async def handle_patreon_oauth_callback(request: web.Request) -> web.Response:
             try:
                 await BOT_INSTANCE.send_message(
                     telegram_id,
-                    f"Ошибка привязки Patreon:\n{error_text}",
+                    f"{ui_text_from_chat(telegram_id, 'Ошибка привязки Patreon:', 'Patreon linking error:')}\n{error_text}",
                 )
             except Exception:
                 pass
@@ -2299,7 +2416,7 @@ async def handle_patreon_webhook(request: web.Request) -> web.Response:
         if BOT_INSTANCE:
             await BOT_INSTANCE.send_message(
                 telegram_id,
-                f"Статус Patreon обновлён: {status}. Уровень: {tier_title or tier_id or 'не указан'}.",
+                f"{ui_text_from_chat(telegram_id, 'Статус Patreon обновлён:', 'Patreon status updated:')} {status}. {ui_text_from_chat(telegram_id, 'Уровень:', 'Tier:')} {tier_title or tier_id or ui_text_from_chat(telegram_id, 'не указан', 'not specified')}.",
             )
 
     return web.Response(text="OK")
