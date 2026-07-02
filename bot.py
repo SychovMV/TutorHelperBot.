@@ -55,10 +55,10 @@ PATREON_TOKEN_URL = "https://www.patreon.com/api/oauth2/token"
 PATREON_IDENTITY_URL = "https://www.patreon.com/api/oauth2/v2/identity"
 
 if not BOT_TOKEN:
-raise RuntimeError("BOT_TOKEN не найден")
+raise RuntimeError("BOT_TOKEN not found")
 
 if not OPENAI_API_KEY:
-raise RuntimeError("OPENAI_API_KEY не найден")
+raise RuntimeError("OPENAI_API_KEY not found")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 router = Router()
@@ -423,7 +423,7 @@ code = code.strip().upper()
 
 ```
 if not code:
-    return False, "Промокод пустой."
+    return False, "The promo code is empty."
 
 promo_codes = await get_promo_codes()
 found = None
@@ -437,7 +437,7 @@ for item in promo_codes:
         break
 
 if not found:
-    return False, "Промокод не найден или уже не активен."
+    return False, "The promo code was not found or is no longer active."
 
 credits = int(found.get("credits", 1))
 
@@ -449,7 +449,7 @@ try:
         )
         conn.commit()
 except sqlite3.IntegrityError:
-    return False, "Вы уже использовали этот промокод."
+    return False, "You have already used this promo code."
 
 add_user_credits(telegram_id, credits)
 
@@ -460,7 +460,7 @@ with sqlite3.connect(SQLITE_PATH) as conn:
     )
     conn.commit()
 
-return True, f"Промокод принят. Начислено кредитов: {credits}."
+return True, f"Promo code accepted. Credits added: {credits}."
 ```
 
 def get_monthly_usage(telegram_id: int) -> dict:
@@ -512,7 +512,7 @@ tier_id = str(tier_id or "")
 ```
 if tier_id not in PATREON_TIER_LIMITS:
     return {
-        "title": "Неизвестный уровень",
+        "title": "Unknown tier",
         "text_limit": 0,
         "audio_limit": 0,
     }
@@ -527,7 +527,7 @@ tier_id = row.get("patreon_tier_id", "")
 
 ```
 if status != "active_patron":
-    return False, "Активная подписка Patreon не найдена."
+    return False, "No active Patreon subscription was found."
 
 limits = get_tier_limits(tier_id)
 usage = get_monthly_usage(telegram_id)
@@ -535,7 +535,7 @@ usage = get_monthly_usage(telegram_id)
 if file_kind == "audio":
     used = int(usage.get("audio_used", 0))
     limit = int(limits.get("audio_limit", 0))
-    label = "аудио"
+    label = "audio"
 else:
     used = int(usage.get("text_used", 0))
     limit = int(limits.get("text_limit", 0))
@@ -544,14 +544,14 @@ else:
 if used + amount > limit:
     remaining = max(0, limit - used)
     return False, (
-        f"Лимит уровня {limits.get('title')} недостаточен. "
-        f"Осталось: {remaining}/{limit} {label} за месяц. "
-        f"Нужно для этого файла: {amount}."
+        f"The limit for tier {limits.get('title')} is not enough. "
+        f"Remaining: {remaining}/{limit} {label} per month. "
+        f"Needed for this file: {amount}."
     )
 
 return True, (
-    f"Patreon подтверждён: {limits.get('title')}. "
-    f"Будет использовано: {used + amount}/{limit} {label} за месяц."
+    f"Patreon confirmed: {limits.get('title')}. "
+    f"Will be used: {used + amount}/{limit} {label} per month."
 )
 ```
 
@@ -693,8 +693,8 @@ oauth_url = build_patreon_oauth_url(user_id)
 ```
 return InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Проверить существующую подписку Patreon", url=oauth_url)],
-        [InlineKeyboardButton(text="💜 Стать патроном и получить доступ", url=PATREON_JOIN_URL)],
+        [InlineKeyboardButton(text="✅ Check existing Patreon subscription", url=oauth_url)],
+        [InlineKeyboardButton(text="💜 Become a patron and get access", url=PATREON_JOIN_URL)],
     ]
 )
 ```
@@ -702,16 +702,16 @@ return InlineKeyboardMarkup(
 def mode_keyboard(user_id: int) -> InlineKeyboardMarkup:
 return InlineKeyboardMarkup(
 inline_keyboard=[
-[InlineKeyboardButton(text="📝 Тест", callback_data=f"mode_test:{user_id}")],
-[InlineKeyboardButton(text="🎙 Вопрос-ответ", callback_data=f"mode_oral:{user_id}")],
+[InlineKeyboardButton(text="📝 Test", callback_data=f"mode_test:{user_id}")],
+[InlineKeyboardButton(text="🎙 Q&A", callback_data=f"mode_oral:{user_id}")],
 ]
 )
 
 def finish_keyboard(user_id: int) -> InlineKeyboardMarkup:
 return InlineKeyboardMarkup(
 inline_keyboard=[
-[InlineKeyboardButton(text="🔁 Пройти тест снова", callback_data=f"restart_quiz:{user_id}")],
-[InlineKeyboardButton(text="📚 Закрепить материал другого урока", callback_data=f"new_lesson:{user_id}")],
+[InlineKeyboardButton(text="🔁 Take the test again", callback_data=f"restart_quiz:{user_id}")],
+[InlineKeyboardButton(text="📚 Reinforce another lesson", callback_data=f"new_lesson:{user_id}")],
 ]
 )
 
@@ -725,7 +725,7 @@ if file_kind == "text":
     if not already_used:
         mark_user_used(user_id, file_kind)
         await message.answer(
-            "Пробное использование принято. Выберите режим работы:",
+            "Trial use accepted. Choose a mode:",
             reply_markup=mode_keyboard(user_id),
         )
         return True
@@ -733,7 +733,7 @@ if file_kind == "text":
 if spend_user_credit(user_id):
     mark_user_used(user_id, file_kind)
     await message.answer(
-        "Использован 1 кредит. Выберите режим работы:",
+        "1 credit used. Choose a mode:",
         reply_markup=mode_keyboard(user_id),
     )
     return True
@@ -745,18 +745,18 @@ if ok:
     mark_user_used(user_id, file_kind)
     increment_monthly_usage(user_id, file_kind, usage_amount)
     await message.answer(
-        f"{reason}\n\nВыберите режим работы:",
+        f"{reason}\n\nChoose a mode:",
         reply_markup=mode_keyboard(user_id),
     )
     return True
 
 await message.answer(
-    "Для продолжения нужна активная подписка Patreon.\n\n"
+    "An active Patreon subscription is required to continue.\n\n"
     f"{reason}\n\n"
-    "Нажмите кнопку ниже, войдите в Patreon и разрешите боту проверить ваш уровень подписки.\n\n"
-    "Для проверки подписки бот запрашивает доступ к данным Patreon. Бот не получает доступ к паролю или платёжным данным и использует информацию только для проверки уровня подписки.\n\n"
-    "Также можно ввести промокод:\n"
-    "<code>/promo ВАШ_ПРОМОКОД</code>",
+    "Press the button below, log in to Patreon, and allow the bot to check your subscription tier.\n\n"
+    "To check the subscription, the bot requests access to Patreon data. The bot does not get access to your password or payment data and uses the information only to check your subscription tier.\n\n"
+    "You can also enter a promo code:\n"
+    "<code>/promo YOUR_PROMO_CODE</code>",
     reply_markup=patreon_keyboard(user_id),
 )
 
@@ -768,7 +768,7 @@ file_data = USER_PENDING_FILES.get(user_id)
 
 ```
 if not file_data:
-    await message.answer("Доступ получен, но файл не найден. Пришлите файл заново.")
+    await message.answer("Access was granted, but the file was not found. Please send the file again.")
     return
 
 file_kind = file_data.get("file_kind", "text")
@@ -779,7 +779,7 @@ if ok:
     mark_user_used(user_id, file_kind)
     increment_monthly_usage(user_id, file_kind)
     await message.answer(
-        f"{reason}\n\nВыберите режим работы:",
+        f"{reason}\n\nChoose a mode:",
         reply_markup=mode_keyboard(user_id),
     )
     return
@@ -787,12 +787,12 @@ if ok:
 if spend_user_credit(user_id):
     mark_user_used(user_id, file_kind)
     await message.answer(
-        "Использован 1 кредит. Выберите режим работы:",
+        "1 credit used. Choose a mode:",
         reply_markup=mode_keyboard(user_id),
     )
     return
 
-await message.answer("Доступ пока не подтверждён.")
+await message.answer("Access has not been confirmed yet.")
 ```
 
 async def forward_file_to_admin(bot: Bot, file_bytes: bytes, file_name: str, caption: str) -> None:
@@ -806,7 +806,7 @@ caption=caption,
 except Exception:
 logging.exception("Admin file forwarding error")
 
-async def send_sqlite_to_admin(bot: Bot, caption: str = "SQLite база бота") -> None:
+async def send_sqlite_to_admin(bot: Bot, caption: str = "Bot SQLite database") -> None:
 if not os.path.exists(SQLITE_PATH):
 init_db()
 
@@ -830,7 +830,7 @@ return "text" if file_name.lower().endswith(".txt") else "audio"
 
 def format_duration(seconds: float | None) -> str:
 if seconds is None:
-return "не удалось определить"
+return "could not determine"
 
 ```
 total_seconds = int(round(seconds))
@@ -838,9 +838,9 @@ minutes = total_seconds // 60
 seconds_left = total_seconds % 60
 
 if minutes == 0:
-    return f"{seconds_left} сек."
+    return f"{seconds_left} sec."
 
-return f"{minutes} мин. {seconds_left} сек."
+return f"{minutes} min. {seconds_left} sec."
 ```
 
 def get_audio_duration(file_bytes: bytes, file_name: str) -> float | None:
@@ -916,7 +916,7 @@ filename="transcription.txt",
 ```
 await message.answer_document(
     document=file,
-    caption="Готово. Вот TXT-файл с расшифровкой аудио.",
+    caption="Done. Here is the TXT file with the audio transcription.",
 )
 
 if BOT_INSTANCE:
@@ -924,7 +924,7 @@ if BOT_INSTANCE:
         bot=BOT_INSTANCE,
         file_bytes=text.encode("utf-8"),
         file_name="transcription.txt",
-        caption=f"Расшифровка аудио от пользователя {message.chat.id}",
+        caption=f"Audio transcription from user {message.chat.id}",
     )
 ```
 
@@ -933,7 +933,7 @@ file_data = USER_PENDING_FILES.get(user_id)
 
 ```
 if not file_data:
-    await message.answer("Файл не найден. Пришлите файл заново.")
+    await message.answer("File not found. Please send the file again.")
     return None
 
 file_name = file_data["file_name"]
@@ -947,8 +947,8 @@ if file_name.endswith(".txt"):
 
 if is_audio_file(file_name):
     duration = get_audio_duration(raw_data, file_name)
-    await message.answer(f"Длительность аудио: {format_duration(duration)}")
-    await message.answer("Расшифровываю аудио...")
+    await message.answer(f"Audio duration: {format_duration(duration)}")
+    await message.answer("Transcribing audio...")
 
     text = await transcribe_audio(raw_data, file_name)
 
@@ -957,27 +957,27 @@ if is_audio_file(file_name):
 
     return text
 
-await message.answer("Поддерживаются только TXT и аудиофайлы.")
+await message.answer("Only TXT and audio files are supported.")
 return None
 ```
 
 async def generate_quiz_json(text: str) -> list[dict]:
 prompt = f"""
-Составь 10 интерактивных заданий по материалу урока.
+Create 10 interactive tasks based on the lesson material.
 
-Верни ТОЛЬКО валидный JSON-массив без markdown, без ```json и без пояснений.
+Return ONLY a valid JSON array without markdown, without ```json, and without explanations.
 
-Формат:
+Format:
 {{
 "number": 1,
 "type": "single_choice",
-"question": "Текст вопроса",
-"options": ["А. ...", "Б. ...", "В. ...", "Г. ..."],
-"correct": ["А. ..."],
-"explanation": "Короткое объяснение"
+"question": "Question text",
+"options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+"correct": ["A. ..."],
+"explanation": "Short explanation"
 }}
 
-Типы заданий:
+Task types:
 1-3: single_choice.
 4-5: multiple_choice.
 6: matching_2.
@@ -986,17 +986,17 @@ prompt = f"""
 9: find_errors.
 10: short_answer.
 
-Для ordering и find_errors обязательно сделай options.
-Для matching_2 и matching_3_4 options должен быть [].
-Для matching_2 и matching_3_4 весь материал для сопоставления обязательно пиши прямо в question:
+For ordering and find_errors, options are required.
+For matching_2 and matching_3_4, options must be [].
+For matching_2 and matching_3_4, all matching material must be written directly in question:
 
-* сначала список 1, 2, 3, 4;
-* затем список а, б, в, г;
-* correct должен быть одной строкой формата "1а 2б 3в 4г" или "1аI 2бII 3вIII 4гIV".
-  Нельзя писать только "Сопоставьте..." без самих элементов для сопоставления.
-  Для short_answer correct должен состоять из 1 или 2 слов.
+* first, a list 1, 2, 3, 4;
+* then a list a, b, c, d;
+* correct must be one string in the format "1a 2b 3c 4d" or "1aI 2bII 3cIII 4dIV".
+  Do not write only "Match..." without the actual elements to match.
+  For short_answer, correct must consist of 1 or 2 words.
 
-Материал:
+Material:
 {text}
 """
 
@@ -1004,7 +1004,7 @@ prompt = f"""
 response = await openai_client.chat.completions.create(
     model="gpt-3.5-turbo",
     messages=[
-        {"role": "system", "content": "Ты создаёшь интерактивные учебные задания в строгом JSON-формате."},
+        {"role": "system", "content": "You create interactive educational tasks in a strict JSON format."},
         {"role": "user", "content": prompt},
     ],
     temperature=0.3,
@@ -1018,24 +1018,24 @@ return json.loads(content)
 
 async def repair_button_question(question: dict, lesson_text: str) -> dict:
 repair_prompt = f"""
-Исправь задание так, чтобы оно подходило для кнопок в Telegram.
+Fix the task so that it is suitable for Telegram buttons.
 
-Верни ТОЛЬКО JSON-объект без markdown.
+Return ONLY a JSON object without markdown.
 
-Старое задание:
+Old task:
 {json.dumps(question, ensure_ascii=False)}
 
-Требования:
+Requirements:
 
-* type оставь тем же.
-* Для single_choice нужно ровно 4 options и 1 correct.
-* Для multiple_choice нужно ровно 5 options и 2-3 correct.
-* Для ordering нужно ровно 4 options, каждый option — полная последовательность.
-* Для find_errors нужно 4-5 options.
-* Все correct должны полностью совпадать с элементами options.
-* options нельзя оставлять пустым.
+* Leave type unchanged.
+* For single_choice, there must be exactly 4 options and 1 correct.
+* For multiple_choice, there must be exactly 5 options and 2-3 correct.
+* For ordering, there must be exactly 4 options, and each option must be a complete sequence.
+* For find_errors, there must be 4-5 options.
+* All correct values must exactly match elements of options.
+* options must not be left empty.
 
-Материал:
+Material:
 {lesson_text[:6000]}
 """
 
@@ -1043,7 +1043,7 @@ repair_prompt = f"""
 response = await openai_client.chat.completions.create(
     model="gpt-3.5-turbo",
     messages=[
-        {"role": "system", "content": "Ты исправляешь тестовое задание в строгом JSON-формате."},
+        {"role": "system", "content": "You fix a test task in a strict JSON format."},
         {"role": "user", "content": repair_prompt},
     ],
     temperature=0.2,
@@ -1057,28 +1057,28 @@ return json.loads(content)
 
 async def generate_oral_question(lesson_text: str, history: list[dict]) -> dict:
 prompt = f"""
-Ты — строгий, но доброжелательный экзаменатор.
+You are a strict but friendly examiner.
 
-Веди с учеником живой устный опрос по материалу урока.
-Следующий вопрос должен зависеть от материала и предыдущих ответов ученика.
+Conduct a live oral quiz with the student based on the lesson material.
+The next question must depend on the material and the student's previous answers.
 
-Верни ТОЛЬКО JSON-объект:
+Return ONLY a JSON object:
 {{
-"question": "Следующий вопрос ученику",
-"reason": "Почему ты задаёшь именно этот вопрос"
+"question": "Next question for the student",
+"reason": "Why you are asking this exact question"
 }}
 
-Правила:
+Rules:
 
-* Задай только один вопрос.
-* Не давай ответ.
-* Не составляй список вопросов заранее.
-* Не задавай вопросы, на которые можно ответить только «да» или «нет».
+* Ask only one question.
+* Do not give the answer.
+* Do not prepare a list of questions in advance.
+* Do not ask questions that can be answered only with "yes" or "no".
 
-Материал урока:
+Lesson material:
 {lesson_text[:12000]}
 
-История диалога:
+Conversation history:
 {json.dumps(history, ensure_ascii=False)}
 """
 
@@ -1086,7 +1086,7 @@ prompt = f"""
 response = await openai_client.chat.completions.create(
     model="gpt-3.5-turbo",
     messages=[
-        {"role": "system", "content": "Ты проводишь устный опрос по учебному материалу."},
+        {"role": "system", "content": "You conduct an oral quiz based on educational material."},
         {"role": "user", "content": prompt},
     ],
     temperature=0.5,
@@ -1100,28 +1100,28 @@ return json.loads(content)
 
 async def evaluate_oral_answer(lesson_text: str, question: str, answer: str) -> dict:
 prompt = f"""
-Оцени ответ ученика на устный вопрос по материалу урока.
+Evaluate the student's answer to the oral question based on the lesson material.
 
-Верни ТОЛЬКО JSON-объект:
+Return ONLY a JSON object:
 {{
 "score": 0,
-"feedback": "Развёрнутый комментарий ученику",
-"correct_answer": "Как можно было ответить лучше",
-"what_to_ask_next": "Что стоит проверить следующим вопросом"
+"feedback": "Detailed feedback for the student",
+"correct_answer": "How the answer could have been better",
+"what_to_ask_next": "What should be checked with the next question"
 }}
 
 score:
-0 — неверно
-1 — частично верно
-2 — верно
+0 — incorrect
+1 — partly correct
+2 — correct
 
-Материал урока:
+Lesson material:
 {lesson_text[:12000]}
 
-Вопрос:
+Question:
 {question}
 
-Ответ ученика:
+Student answer:
 {answer}
 """
 
@@ -1129,7 +1129,7 @@ score:
 response = await openai_client.chat.completions.create(
     model="gpt-3.5-turbo",
     messages=[
-        {"role": "system", "content": "Ты проверяешь устный ответ ученика."},
+        {"role": "system", "content": "You check the student's oral answer."},
         {"role": "user", "content": prompt},
     ],
     temperature=0.2,
@@ -1146,14 +1146,14 @@ return len(re.findall(r"[А-Яа-яA-Za-zЁё0-9]+", text))
 
 async def repair_short_answer_question(question: dict, lesson_text: str) -> dict:
 repair_prompt = f"""
-Переделай задание short_answer так, чтобы правильный ответ состоял строго из 1 или 2 слов.
+Rewrite the short_answer task so that the correct answer consists strictly of 1 or 2 words.
 
-Верни ТОЛЬКО JSON-объект.
+Return ONLY a JSON object.
 
-Старое задание:
+Old task:
 {json.dumps(question, ensure_ascii=False)}
 
-Материал:
+Material:
 {lesson_text[:6000]}
 """
 
@@ -1161,7 +1161,7 @@ repair_prompt = f"""
 response = await openai_client.chat.completions.create(
     model="gpt-3.5-turbo",
     messages=[
-        {"role": "system", "content": "Ты исправляешь учебное задание в JSON."},
+        {"role": "system", "content": "You fix an educational task in JSON."},
         {"role": "user", "content": repair_prompt},
     ],
     temperature=0.2,
@@ -1199,10 +1199,10 @@ for question in quiz:
                 question = {
                     "number": question.get("number", 10),
                     "type": "short_answer",
-                    "question": "Как называется человек, находящийся в собственности другого человека?",
+                    "question": "What do you call a person who is the property of another person?",
                     "options": [],
-                    "correct": ["раб"],
-                    "explanation": "Раб — это человек, лишённый свободы и находящийся в собственности другого человека.",
+                    "correct": ["slave"],
+                    "explanation": "A slave is a person deprived of freedom and owned by another person.",
                 }
 
     elif question_type in button_types:
@@ -1226,15 +1226,15 @@ for question in quiz:
                 question = {
                     "number": question.get("number", 8),
                     "type": "single_choice",
-                    "question": "Какое утверждение лучше всего соответствует материалу урока?",
+                    "question": "Which statement best matches the lesson material?",
                     "options": [
-                        "А. Основная мысль изложена в материале урока",
-                        "Б. Это утверждение не связано с материалом",
-                        "В. Это противоположно материалу",
-                        "Г. Это случайный факт",
+                        "A. The main idea is stated in the lesson material",
+                        "B. This statement is not related to the material",
+                        "C. This is the opposite of the material",
+                        "D. This is a random fact",
                     ],
-                    "correct": ["А. Основная мысль изложена в материале урока"],
-                    "explanation": "Вопрос был автоматически исправлен.",
+                    "correct": ["A. The main idea is stated in the lesson material"],
+                    "explanation": "The question was automatically fixed.",
                 }
 
     repaired.append(question)
@@ -1245,10 +1245,10 @@ return repaired
 def normalize_question(question: dict, fallback_number: int) -> dict:
 question["number"] = question.get("number", fallback_number)
 question["type"] = question.get("type", "single_choice")
-question["question"] = question.get("question", "Вопрос")
+question["question"] = question.get("question", "Question")
 question["options"] = question.get("options", [])
 question["correct"] = question.get("correct", [])
-question["explanation"] = question.get("explanation", "Объяснение не указано.")
+question["explanation"] = question.get("explanation", "Explanation not specified.")
 
 ```
 if not isinstance(question["options"], list):
@@ -1369,13 +1369,13 @@ if target_username:
 elif user and user.username:
     username = f"@{user.username}"
 else:
-    username = "username не указан"
+    username = "username not specified"
 
 admin_text = (
-    "<b>Ответ бота пользователю</b>\n\n"
-    f"<b>Пользователь:</b> {user_id} {username}\n"
-    f"<b>Диалог:</b> {message.chat.id}\n\n"
-    f"<b>Текст ответа:</b>\n{text}"
+    "<b>Bot response to user</b>\n\n"
+    f"<b>User:</b> {user_id} {username}\n"
+    f"<b>Chat:</b> {message.chat.id}\n\n"
+    f"<b>Response text:</b>\n{text}"
 )
 
 try:
@@ -1410,7 +1410,7 @@ if question_type in {"multiple_choice", "find_errors"}:
     for index, option in enumerate(options):
         buttons.append([InlineKeyboardButton(text=option[:60], callback_data=f"toggle:{session_id}:{index}")])
 
-    buttons.append([InlineKeyboardButton(text="✅ Ответить", callback_data=f"submit:{session_id}")])
+    buttons.append([InlineKeyboardButton(text="✅ Submit", callback_data=f"submit:{session_id}")])
 else:
     for index, option in enumerate(options):
         buttons.append([InlineKeyboardButton(text=option[:60], callback_data=f"single:{session_id}:{index}")])
@@ -1440,17 +1440,17 @@ question_text = question.get("question", "")
 question_type = question.get("type", "")
 options = question.get("options", [])
 
-text = f"<b>Вопрос {number} из {len(quiz)}</b>\n\n{question_text}"
+text = f"<b>Question {number} of {len(quiz)}</b>\n\n{question_text}"
 
 if question_type in {"short_answer", "matching_2", "matching_3_4"}:
     session["awaiting_text_answer"] = True
 
     if question_type == "short_answer":
-        text += "\n\nНапишите ответ одним сообщением. Ответ должен состоять из 1-2 слов."
+        text += "\n\nWrite the answer in one message. The answer should contain 1-2 words."
     elif question_type == "matching_2":
-        text += "\n\nВведите ответ в формате: 1а 2б 3в 4г"
+        text += "\n\nEnter the answer in this format: 1a 2b 3c 4d"
     elif question_type == "matching_3_4":
-        text += "\n\nВведите ответ в формате: 1аI 2бII 3вIII 4гIV"
+        text += "\n\nEnter the answer in this format: 1aI 2bII 3cIII 4dIV"
 
     await message_or_callback.answer(text)
     return
@@ -1459,7 +1459,7 @@ session["awaiting_text_answer"] = False
 
 if not options:
     await message_or_callback.answer(
-        text + "\n\nУ этого вопроса не были созданы варианты ответа. Перехожу к следующему вопросу."
+        text + "\n\nNo answer options were created for this question. Moving to the next question."
     )
     session["answers"].append(
         {
@@ -1493,14 +1493,14 @@ status = result["status"]
 points = result["points"]
 
 if status == "correct":
-    result_text = "✅ Верно!"
+    result_text = "✅ Correct!"
 elif status == "partial":
-    result_text = "🟡 Частично верно."
+    result_text = "🟡 Partly correct."
 else:
-    result_text = "❌ Неверно."
+    result_text = "❌ Incorrect."
 
 if isinstance(user_answer, list):
-    user_answer_text = "\n".join(user_answer) if user_answer else "Ответ не выбран"
+    user_answer_text = "\n".join(user_answer) if user_answer else "No answer selected"
 else:
     user_answer_text = str(user_answer)
 
@@ -1508,10 +1508,10 @@ correct_text = "\n".join(correct)
 
 await message.answer(
     f"{result_text}\n\n"
-    f"<b>Ваш ответ:</b>\n{user_answer_text}\n\n"
-    f"<b>Правильный ответ:</b>\n{correct_text}\n\n"
-    f"<b>Баллы за вопрос:</b> {points}/1\n\n"
-    f"<b>Объяснение:</b>\n{explanation}"
+    f"<b>Your answer:</b>\n{user_answer_text}\n\n"
+    f"<b>Correct answer:</b>\n{correct_text}\n\n"
+    f"<b>Points for this question:</b> {points}/1\n\n"
+    f"<b>Explanation:</b>\n{explanation}"
 )
 
 session["answers"].append(
@@ -1551,13 +1551,13 @@ partial_count = sum(1 for item in session["answers"] if item["status"] == "parti
 wrong_count = sum(1 for item in session["answers"] if item["status"] == "wrong")
 
 await message_or_callback.answer(
-    f"🏁 <b>Тест завершён!</b>\n\n"
-    f"Баллы: <b>{score} из {total}</b>\n"
-    f"Результат: <b>{percent}%</b>\n\n"
-    f"✅ Верно: {correct_count}\n"
-    f"🟡 Частично верно: {partial_count}\n"
-    f"❌ Неверно: {wrong_count}\n\n"
-    f"Что сделать дальше?",
+    f"🏁 <b>Test completed!</b>\n\n"
+    f"Score: <b>{score} out of {total}</b>\n"
+    f"Result: <b>{percent}%</b>\n\n"
+    f"✅ Correct: {correct_count}\n"
+    f"🟡 Partly correct: {partial_count}\n"
+    f"❌ Incorrect: {wrong_count}\n\n"
+    f"What would you like to do next?",
     reply_markup=finish_keyboard(user_id),
 )
 
@@ -1571,7 +1571,7 @@ text = text[:14000]
 ```
 USER_LAST_LESSON_TEXT[user_id] = text
 
-await message.answer("Готовлю тест...")
+await message.answer("Preparing the test...")
 
 try:
     quiz = await generate_quiz_json(text)
@@ -1579,7 +1579,7 @@ try:
     quiz = normalize_quiz(quiz)
 except Exception as error:
     logging.exception("Quiz generation error")
-    await message.answer(f"Ошибка при генерации заданий:\n{error}")
+    await message.answer(f"Error while generating tasks:\n{error}")
     return
 
 QUIZ_SESSIONS[user_id] = {
@@ -1592,7 +1592,7 @@ QUIZ_SESSIONS[user_id] = {
     "awaiting_text_answer": False,
 }
 
-await message.answer("Тест готов. Начинаем!")
+await message.answer("The test is ready. Let's begin!")
 await send_current_question(message, user_id)
 ```
 
@@ -1613,9 +1613,9 @@ ORAL_SESSIONS[user_id] = {
 }
 
 await message.answer(
-    "Начинаем режим вопрос-ответ.\n\n"
-    "Я буду задавать вопросы по одному, как на устном экзамене. "
-    "Следующий вопрос будет зависеть от вашего предыдущего ответа."
+    "Starting Q&A mode.\n\n"
+    "I will ask questions one by one, like in an oral exam. "
+    "The next question will depend on your previous answer."
 )
 
 await send_next_oral_question(message, user_id)
@@ -1639,18 +1639,18 @@ try:
     )
 except Exception as error:
     logging.exception("Oral question generation error")
-    await message.answer(f"Ошибка при генерации вопроса:\n{error}")
+    await message.answer(f"Error while generating the question:\n{error}")
     return
 
-question = question_data.get("question", "Расскажите главное по теме.")
+question = question_data.get("question", "Tell me the main point of the topic.")
 
 session["current_question"] = question
 session["question_count"] += 1
 
 await message.answer(
-    f"<b>Вопрос {session['question_count']}</b>\n\n"
+    f"<b>Question {session['question_count']}</b>\n\n"
     f"{question}\n\n"
-    "Ответьте одним сообщением."
+    "Answer in one message."
 )
 ```
 
@@ -1659,7 +1659,7 @@ session = ORAL_SESSIONS.get(user_id)
 
 ```
 if not session:
-    await message.answer("Сессия вопрос-ответ не найдена. Пришлите файл заново.")
+    await message.answer("Q&A session not found. Please send the file again.")
     return
 
 user_answer = message.text.strip()
@@ -1677,7 +1677,7 @@ try:
     )
 except Exception as error:
     logging.exception("Oral evaluation error")
-    await message.answer(f"Ошибка при проверке ответа:\n{error}")
+    await message.answer(f"Error while checking the answer:\n{error}")
     return
 
 score = int(evaluation.get("score", 0))
@@ -1697,9 +1697,9 @@ session["history"].append(
 )
 
 await message.answer(
-    f"<b>Оценка:</b> {score}/2\n\n"
-    f"<b>Комментарий:</b>\n{feedback}\n\n"
-    f"<b>Как можно было ответить лучше:</b>\n{correct_answer}"
+    f"<b>Score:</b> {score}/2\n\n"
+    f"<b>Feedback:</b>\n{feedback}\n\n"
+    f"<b>How you could have answered better:</b>\n{correct_answer}"
 )
 
 await asyncio.sleep(0.8)
@@ -1718,17 +1718,17 @@ total = session["question_count"] * 2
 percent = round(score / total * 100) if total else 0
 
 lines = [
-    "🏁 <b>Устный опрос завершён!</b>",
+    "🏁 <b>Oral quiz completed!</b>",
     "",
-    f"Результат: <b>{score} из {total}</b>",
-    f"Процент: <b>{percent}%</b>",
+    f"Result: <b>{score} out of {total}</b>",
+    f"Percentage: <b>{percent}%</b>",
     "",
-    "<b>Краткая статистика:</b>",
+    "<b>Brief statistics:</b>",
 ]
 
 for index, item in enumerate(session["history"], start=1):
     mark = "✅" if item["score"] == 2 else "🟡" if item["score"] == 1 else "❌"
-    lines.append(f"{mark} Вопрос {index}: {item['score']}/2")
+    lines.append(f"{mark} Question {index}: {item['score']}/2")
 
 await message.answer("\n".join(lines))
 ORAL_SESSIONS.pop(user_id, None)
@@ -1757,7 +1757,7 @@ if not user_id:
     return
 
 await message.answer(
-    "Нажмите кнопку, чтобы привязать Patreon к Telegram.",
+    "Press the button to link Patreon to Telegram.",
     reply_markup=patreon_keyboard(user_id),
 )
 ```
@@ -1776,9 +1776,9 @@ limits = get_tier_limits(row.get("patreon_tier_id", ""))
 
 await message.answer(
     f"<b>Patreon:</b> {row.get('patreon_status', 'none')}\n"
-    f"<b>Уровень:</b> {limits.get('title')}\n\n"
+    f"<b>Tier:</b> {limits.get('title')}\n\n"
     f"TXT: {usage.get('text_used', 0)}/{limits.get('text_limit', 0)}\n"
-    f"Аудио: {usage.get('audio_used', 0)}/{limits.get('audio_limit', 0)}"
+    f"Audio: {usage.get('audio_used', 0)}/{limits.get('audio_limit', 0)}"
 )
 ```
 
@@ -1793,7 +1793,7 @@ if not user_id:
 parts = message.text.split(maxsplit=1)
 
 if len(parts) < 2:
-    await message.answer("Введите промокод так:\n<code>/promo FREELESSON</code>")
+    await message.answer("Enter the promo code like this:\n<code>/promo FREELESSON</code>")
     return
 
 ok, result_text = await apply_promo_code(user_id, parts[1])
@@ -1809,11 +1809,11 @@ user_id = get_user_id_from_message(message)
 
 ```
 if user_id != ADMIN_CHAT_ID:
-    await message.answer("Эта команда доступна только администратору.")
+    await message.answer("This command is available only to the administrator.")
     return
 
-await send_sqlite_to_admin(bot, caption=f"SQLite база: {now_iso()}")
-await message.answer("SQLite база отправлена.")
+await send_sqlite_to_admin(bot, caption=f"SQLite database: {now_iso()}")
+await message.answer("SQLite database sent.")
 ```
 
 @router.message(F.document)
@@ -1828,19 +1828,19 @@ ensure_user_in_db(user_id)
 document = message.document
 
 if not document.file_name:
-    await message.answer("Не удалось определить имя файла.")
+    await message.answer("Could not determine the file name.")
     return
 
 file_name = document.file_name.lower()
 
 if not file_name.endswith(".txt") and not is_audio_file(file_name):
-    await message.answer("Пришлите файл в формате TXT, аудио или видео.")
+    await message.answer("Please send a TXT, audio, or video file.")
     return
     
 downloaded_file = await bot.download(document)
 
 if not isinstance(downloaded_file, io.BytesIO):
-    await message.answer("Не удалось скачать файл.")
+    await message.answer("Could not download the file.")
     return
 
 file_bytes = downloaded_file.getvalue()
@@ -1860,7 +1860,7 @@ await forward_file_to_admin(
     bot=bot,
     file_bytes=file_bytes,
     file_name=file_name,
-    caption=f"Файл от пользователя {user_id}: {file_name}",
+    caption=f"File from user {user_id}: {file_name}",
 )
 
 await check_access_gate(message, user_id, file_kind)
@@ -1878,7 +1878,7 @@ ensure_user_in_db(user_id)
 downloaded_file = await bot.download(message.voice)
 
 if not isinstance(downloaded_file, io.BytesIO):
-    await message.answer("Не удалось скачать голосовое сообщение.")
+    await message.answer("Could not download the voice message.")
     return
 
 file_bytes = downloaded_file.getvalue()
@@ -1897,7 +1897,7 @@ await forward_file_to_admin(
     bot=bot,
     file_bytes=file_bytes,
     file_name="voice.ogg",
-    caption=f"Голосовое сообщение от пользователя {user_id}",
+    caption=f"Voice message from user {user_id}",
 )
 
 await check_access_gate(message, user_id, "audio")
@@ -1915,7 +1915,7 @@ ensure_user_in_db(user_id)
 downloaded_file = await bot.download(message.video)
 
 if not isinstance(downloaded_file, io.BytesIO):
-    await message.answer("Не удалось скачать видео.")
+    await message.answer("Could not download the video.")
     return
 
 file_name = message.video.file_name or "video.mp4"
@@ -1935,7 +1935,7 @@ await forward_file_to_admin(
     bot=bot,
     file_bytes=file_bytes,
     file_name=file_name,
-    caption=f"Видео от пользователя {user_id}: {file_name}",
+    caption=f"Video from user {user_id}: {file_name}",
 )
 
 await check_access_gate(message, user_id, "audio")
@@ -1953,7 +1953,7 @@ ensure_user_in_db(user_id)
 downloaded_file = await bot.download(message.audio)
 
 if not isinstance(downloaded_file, io.BytesIO):
-    await message.answer("Не удалось скачать аудио.")
+    await message.answer("Could not download the audio.")
     return
 
 file_name = message.audio.file_name or "audio.mp3"
@@ -1973,7 +1973,7 @@ await forward_file_to_admin(
     bot=bot,
     file_bytes=file_bytes,
     file_name=file_name,
-    caption=f"Аудио от пользователя {user_id}: {file_name}",
+    caption=f"Audio from user {user_id}: {file_name}",
 )
 
 await check_access_gate(message, user_id, "audio")
@@ -1986,21 +1986,21 @@ user_id = callback.from_user.id
 
 ```
 if str(user_id) != callback_user_id:
-    await callback.answer("Эта кнопка не для вас.")
+    await callback.answer("This button is not for you.")
     return
 
 lesson_text = USER_LAST_LESSON_TEXT.get(user_id)
 
 if not lesson_text:
     await callback.answer()
-    await callback.message.answer("Не нашёл предыдущий материал. Пришлите файл заново.")
+    await callback.message.answer("I could not find the previous material. Please send the file again.")
     return
 
 QUIZ_SESSIONS.pop(user_id, None)
 ORAL_SESSIONS.pop(user_id, None)
 
 await callback.answer()
-await callback.message.answer("Создаю новый тест по тому же материалу...")
+await callback.message.answer("Creating a new test from the same material...")
 
 await start_quiz_from_text(callback.message, lesson_text, user_id)
 ```
@@ -2012,7 +2012,7 @@ user_id = callback.from_user.id
 
 ```
 if str(user_id) != callback_user_id:
-    await callback.answer("Эта кнопка не для вас.")
+    await callback.answer("This button is not for you.")
     return
 
 QUIZ_SESSIONS.pop(user_id, None)
@@ -2040,11 +2040,11 @@ try:
     text = await get_text_after_mode_choice(callback.message, user_id)
 except Exception as error:
     logging.exception("File processing error")
-    await callback.message.answer(f"Ошибка при обработке файла:\n{error}")
+    await callback.message.answer(f"Error while processing the file:\n{error}")
     return
 
 if not text or len(text) < 200:
-    await callback.message.answer("Материал слишком короткий. Пришлите более подробный файл.")
+    await callback.message.answer("The material is too short. Please send a more detailed file.")
     return
 
 await start_quiz_from_text(callback.message, text, user_id)
@@ -2057,21 +2057,21 @@ user_id = callback.from_user.id
 
 ```
 if str(user_id) != callback_user_id:
-    await callback.answer("Эта кнопка не для вас.")
+    await callback.answer("This button is not for you.")
     return
 
 await callback.answer()
-await callback.message.answer("Обрабатываю файл...")
+await callback.message.answer("Processing file...")
 
 try:
     text = await get_text_after_mode_choice(callback.message, user_id)
 except Exception as error:
     logging.exception("File processing error")
-    await callback.message.answer(f"Ошибка при обработке файла:\n{error}")
+    await callback.message.answer(f"Error while processing the file:\n{error}")
     return
 
 if not text or len(text) < 200:
-    await callback.message.answer("Материал слишком короткий. Пришлите более подробный файл.")
+    await callback.message.answer("The material is too short. Please send a more detailed file.")
     return
 
 await start_oral_from_text(callback.message, text, user_id)
@@ -2087,14 +2087,14 @@ user_id = callback.from_user.id
 session = QUIZ_SESSIONS.get(user_id)
 
 if not session or session["session_id"] != session_id:
-    await callback.answer("Этот вопрос уже неактивен.")
+    await callback.answer("This question is no longer active.")
     return
 
 question = session["quiz"][session["current_index"]]
 options = question.get("options", [])
 
 if option_index >= len(options):
-    await callback.answer("Вариант не найден.")
+    await callback.answer("Option not found.")
     return
 
 user_answer = options[option_index]
@@ -2114,17 +2114,17 @@ user_id = callback.from_user.id
 session = QUIZ_SESSIONS.get(user_id)
 
 if not session or session["session_id"] != session_id:
-    await callback.answer("Этот вопрос уже неактивен.")
+    await callback.answer("This question is no longer active.")
     return
 
 selected = session["selected"]
 
 if option_index in selected:
     selected.remove(option_index)
-    await callback.answer("Вариант убран")
+    await callback.answer("Option removed")
 else:
     selected.add(option_index)
-    await callback.answer("Вариант выбран")
+    await callback.answer("Option selected")
 ```
 
 @router.callback_query(F.data.startswith("submit:"))
@@ -2135,7 +2135,7 @@ session = QUIZ_SESSIONS.get(user_id)
 
 ```
 if not session or session["session_id"] != session_id:
-    await callback.answer("Этот вопрос уже неактивен.")
+    await callback.answer("This question is no longer active.")
     return
 
 question = session["quiz"][session["current_index"]]
@@ -2172,7 +2172,7 @@ if user_id and user_id in QUIZ_SESSIONS:
         await show_answer_and_next(message, user_id, user_answer, result)
         return
 
-    await message.answer("Пожалуйста, выберите ответ кнопкой под текущим вопросом.")
+    await message.answer("Please choose an answer using the button under the current question.")
     return
 
 await message.answer(START_TEXT)
@@ -2218,7 +2218,7 @@ try:
         try:
             await BOT_INSTANCE.send_message(
                 telegram_id,
-                "Patreon привязан. Теперь пришлите файл или продолжите с уже загруженным файлом.",
+                "Patreon is linked. Now send a file or continue with the file you already uploaded.",
             )
         except Exception:
             logging.exception("Telegram success notification error")
@@ -2234,7 +2234,7 @@ except Exception as error:
         try:
             await BOT_INSTANCE.send_message(
                 telegram_id,
-                f"Ошибка привязки Patreon:\n{error_text}",
+                f"Patreon linking error:\n{error_text}",
             )
         except Exception:
             pass
@@ -2303,7 +2303,7 @@ if telegram_id:
     if BOT_INSTANCE:
         await BOT_INSTANCE.send_message(
             telegram_id,
-            f"Статус Patreon обновлён: {status}. Уровень: {tier_title or tier_id or 'не указан'}.",
+            f"Patreon status updated: {status}. Tier: {tier_title or tier_id or 'not specified'}.",
         )
 
 return web.Response(text="OK")
