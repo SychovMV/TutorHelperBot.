@@ -70,9 +70,9 @@ USER_LAST_LESSON_TEXT: dict[int, str] = {}
 USER_PENDING_FILES: dict[int, dict] = {}
 
 START_TEXT = (
-"Здравствуйте. Я помогу закрепить материал урока. "
-"Пришлите объяснение нового материала в аудио, видео формате или формате TXT \n\n"
-"Пришлите файл в качестве ответа на это сообщение"
+"Hello. I will help reinforce the lesson material. "
+"Send the explanation of the new material as audio, video, or TXT.\n\n"
+"Send the file as a reply to this message."
 )
 
 AUDIO_EXTENSIONS = {
@@ -2030,11 +2030,11 @@ user_id = callback.from_user.id
 
 ```
 if str(user_id) != callback_user_id:
-    await callback.answer("Эта кнопка не для вас.")
+    await callback.answer("This button is not for you.")
     return
 
 await callback.answer()
-await callback.message.answer("Обрабатываю файл...")
+await callback.message.answer("Processing file...")
 
 try:
     text = await get_text_after_mode_choice(callback.message, user_id)
