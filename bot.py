@@ -58,7 +58,7 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
     
 if not OPENAI_API_KEY:
-raise RuntimeError("OPENAI_API_KEY не найден")
+    raise RuntimeError("OPENAI_API_KEY не найден")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 router = Router()
