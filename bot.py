@@ -69,7 +69,6 @@ QUIZ_SESSIONS: dict[int, dict] = {}
 ORAL_SESSIONS: dict[int, dict] = {}
 USER_LAST_LESSON_TEXT: dict[int, str] = {}
 USER_PENDING_FILES: dict[int, dict] = {}
-CHAT_LANGS: dict[int, str] = {}
 
 START_TEXT_RU = (
     "Здравствуйте. Я помогу закрепить материал урока. "
@@ -83,35 +82,64 @@ START_TEXT_EN = (
     "Send the file as a reply to this message."
 )
 
-def get_chat_lang(chat_id: int | None) -> str:
+def get_chat_lang(chat_id: int | str | None) -> str:
     if chat_id is None:
         return "en"
-    return CHAT_LANGS.get(int(chat_id), "en")
+
+    try:
+        chat_id_int = int(chat_id)
+    except Exception:
+        return "en"
+
+    try:
+        with sqlite3.connect(SQLITE_PATH) as conn:
+            row = conn.execute(
+                "SELECT language FROM chat_settings WHERE chat_id = ?",
+                (chat_id_int,),
+            ).fetchone()
+    except Exception:
+        return "en"
+
+    if row and str(row[0]).lower() == "ru":
+        return "ru"
+
+    return "en"
 
 
-def set_chat_lang(chat_id: int | None, lang: str) -> None:
+def set_chat_lang(chat_id: int | str | None, language: str) -> None:
     if chat_id is None:
         return
-    CHAT_LANGS[int(chat_id)] = "ru" if lang == "ru" else "en"
 
+    try:
+        chat_id_int = int(chat_id)
+    except Exception:
+        return
 
-def get_ui_lang_from_user(user) -> str:
-    # Default UI language is English.
-    # Telegram interface language is intentionally ignored.
-    return "en"
+    language = "ru" if str(language).lower().startswith("ru") else "en"
+
+    with sqlite3.connect(SQLITE_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_settings (chat_id, language, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                language = excluded.language,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id_int, language, now_iso()),
+        )
+        conn.commit()
 
 
 def get_ui_lang_from_message(message: Message) -> str:
     return get_chat_lang(message.chat.id)
 
 
-def ui_text_from_chat(chat_id: int | None, ru: str, en: str) -> str:
+def ui_text_from_chat(chat_id: int | str | None, ru: str, en: str) -> str:
     return ru if get_chat_lang(chat_id) == "ru" else en
 
 
 def ui_text_from_user(user, ru: str, en: str) -> str:
-    # Backward-compatible fallback for old calls.
-    # Default is English.
     return en
 
 
@@ -119,12 +147,11 @@ def ui_text(message: Message, ru: str, en: str) -> str:
     return ui_text_from_chat(message.chat.id, ru, en)
 
 
-def start_text_for_chat(chat_id: int | None) -> str:
-    return START_TEXT_RU if get_chat_lang(chat_id) == "ru" else START_TEXT_EN
+def start_text_for_chat(chat_id: int | str | None) -> str:
+    return ui_text_from_chat(chat_id, START_TEXT_RU, START_TEXT_EN)
 
 
 def start_text_for_user(user) -> str:
-    # Backward-compatible fallback. Default is English.
     return START_TEXT_EN
 
 
@@ -132,64 +159,15 @@ def is_ru_user(user) -> bool:
     return False
 
 
-def language_keyboard(chat_id: int | None = None) -> InlineKeyboardMarkup:
+def language_keyboard(chat_id: int | str | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🌐 Сменить язык" if get_chat_lang(chat_id) == "ru" else "🌐 Change language",
-                    callback_data="switch_language",
-                )
-            ]
+            [InlineKeyboardButton(
+                text=ui_text_from_chat(chat_id, "🌐 Сменить язык", "🌐 Change language"),
+                callback_data="switch_language"
+            )]
         ]
     )
-
-
-def translate_access_reason(reason: str, lang: str) -> str:
-    if lang == "ru":
-        return reason
-
-    if reason == "Активная подписка Patreon не найдена.":
-        return "No active Patreon subscription was found."
-
-    if reason.startswith("Patreon подтверждён:"):
-        return (
-            reason
-            .replace("Patreon подтверждён:", "Patreon confirmed:")
-            .replace("Будет использовано:", "Will be used:")
-            .replace("за месяц", "per month")
-            .replace("аудио", "audio")
-        )
-
-    if reason.startswith("Лимит уровня"):
-        return (
-            reason
-            .replace("Лимит уровня", "The limit for tier")
-            .replace("недостаточен.", "is not enough.")
-            .replace("Осталось:", "Remaining:")
-            .replace("Нужно для этого файла:", "Needed for this file:")
-            .replace("за месяц", "per month")
-            .replace("аудио", "audio")
-        )
-
-    return reason
-
-
-def translate_promo_result(text: str, lang: str) -> str:
-    if lang == "ru":
-        return text
-
-    if text == "Промокод пустой.":
-        return "The promo code is empty."
-    if text == "Промокод не найден или уже не активен.":
-        return "The promo code was not found or is no longer active."
-    if text == "Вы уже использовали этот промокод.":
-        return "You have already used this promo code."
-    if text.startswith("Промокод принят. Начислено кредитов:"):
-        credits = text.split(":")[-1].strip().rstrip(".")
-        return f"Promo code accepted. Credits added: {credits}."
-
-    return text
 
 
 AUDIO_EXTENSIONS = {
@@ -265,6 +243,16 @@ def init_db() -> None:
                 credits INTEGER DEFAULT 1,
                 used_at TEXT,
                 UNIQUE(telegram_id, code)
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_settings (
+                chat_id INTEGER PRIMARY KEY,
+                language TEXT DEFAULT 'en',
+                updated_at TEXT
             )
             """
         )
@@ -793,6 +781,7 @@ def patreon_keyboard(user_id: int, chat_id=None) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "✅ Проверить существующую подписку Patreon", "✅ Check existing Patreon subscription"), url=oauth_url)],
             [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "💜 Стать патроном и получить доступ", "💜 Become a patron and get access"), url=PATREON_JOIN_URL)],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🌐 Сменить язык", "🌐 Change language"), callback_data="switch_language")],
         ]
     )
 
@@ -802,6 +791,7 @@ def mode_keyboard(user_id: int, chat_id=None) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "📝 Тест", "📝 Test"), callback_data=f"mode_test:{user_id}")],
             [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🎙 Вопрос-ответ", "🎙 Q&A"), callback_data=f"mode_oral:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🌐 Сменить язык", "🌐 Change language"), callback_data="switch_language")],
         ]
     )
 
@@ -811,6 +801,7 @@ def finish_keyboard(user_id: int, chat_id=None) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🔁 Пройти тест снова", "🔁 Take the test again"), callback_data=f"restart_quiz:{user_id}")],
             [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "📚 Закрепить материал другого урока", "📚 Reinforce another lesson"), callback_data=f"new_lesson:{user_id}")],
+            [InlineKeyboardButton(text=ui_text_from_chat(chat_id, "🌐 Сменить язык", "🌐 Change language"), callback_data="switch_language")],
         ]
     )
 
@@ -843,25 +834,22 @@ async def check_access_gate(message: Message, user_id: int, file_kind: str) -> b
     if ok:
         mark_user_used(user_id, file_kind)
         increment_monthly_usage(user_id, file_kind, usage_amount)
-        reason_text = translate_access_reason(reason, get_ui_lang_from_message(message))
         await message.answer(
-            f"{reason_text}\n\n{ui_text(message, 'Выберите режим работы:', 'Choose a mode:')}",
+            f"{reason}\n\n{ui_text(message, 'Выберите режим работы:', 'Choose a mode:')}",
             reply_markup=mode_keyboard(user_id, message.chat.id),
         )
         return True
 
-    reason_text = translate_access_reason(reason, get_ui_lang_from_message(message))
-
     await message.answer(
         ui_text(message,
             "Для продолжения нужна активная подписка Patreon.\n\n"
-            f"{reason_text}\n\n"
+            f"{reason}\n\n"
             "Нажмите кнопку ниже, войдите в Patreon и разрешите боту проверить ваш уровень подписки.\n\n"
             "Для проверки подписки бот запрашивает доступ к данным Patreon. Бот не получает доступ к паролю или платёжным данным и использует информацию только для проверки уровня подписки.\n\n"
             "Также можно ввести промокод:\n"
             "<code>/promo ВАШ_ПРОМОКОД</code>",
             "An active Patreon subscription is required to continue.\n\n"
-            f"{reason_text}\n\n"
+            f"{reason}\n\n"
             "Press the button below, log in to Patreon, and allow the bot to check your subscription tier.\n\n"
             "To check the subscription, the bot requests access to Patreon data. The bot does not get access to your password or payment data and uses the information only to check your subscription tier.\n\n"
             "You can also enter a promo code:\n"
@@ -887,9 +875,8 @@ async def unlock_after_patreon_or_promo(message: Message, user_id: int) -> None:
     if ok:
         mark_user_used(user_id, file_kind)
         increment_monthly_usage(user_id, file_kind)
-        reason_text = translate_access_reason(reason, get_ui_lang_from_message(message))
         await message.answer(
-            f"{reason_text}\n\n{ui_text(message, 'Выберите режим работы:', 'Choose a mode:')}",
+            f"{reason}\n\n{ui_text(message, 'Выберите режим работы:', 'Choose a mode:')}",
             reply_markup=mode_keyboard(user_id, message.chat.id),
         )
         return
@@ -1502,7 +1489,7 @@ async def monitored_answer(
     )
     return sent_message
 
-def make_keyboard(question: dict, session_id: str, lang: str = "en") -> InlineKeyboardMarkup:
+def make_keyboard(question: dict, session_id: str) -> InlineKeyboardMarkup:
     question_type = question.get("type", "")
     options = question.get("options", [])
     buttons = []
@@ -1511,7 +1498,7 @@ def make_keyboard(question: dict, session_id: str, lang: str = "en") -> InlineKe
         for index, option in enumerate(options):
             buttons.append([InlineKeyboardButton(text=option[:60], callback_data=f"toggle:{session_id}:{index}")])
 
-        buttons.append([InlineKeyboardButton(text="✅ Ответить" if lang == "ru" else "✅ Submit", callback_data=f"submit:{session_id}")])
+        buttons.append([InlineKeyboardButton(text="✅ Ответить", callback_data=f"submit:{session_id}")])
     else:
         for index, option in enumerate(options):
             buttons.append([InlineKeyboardButton(text=option[:60], callback_data=f"single:{session_id}:{index}")])
@@ -1540,7 +1527,7 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
     question_type = question.get("type", "")
     options = question.get("options", [])
 
-    text = f"<b>{ui_text(message_or_callback, 'Вопрос', 'Question')} {number} {ui_text(message_or_callback, 'из', 'of')} {len(quiz)}</b>\n\n{question_text}"
+    text = f"<b>Вопрос {number} из {len(quiz)}</b>\n\n{question_text}"
 
     if question_type in {"short_answer", "matching_2", "matching_3_4"}:
         session["awaiting_text_answer"] = True
@@ -1574,7 +1561,7 @@ async def send_current_question(message_or_callback, user_id: int) -> None:
 
     await message_or_callback.answer(
         text,
-        reply_markup=make_keyboard(question, session["session_id"], session.get("ui_lang", "en")),
+        reply_markup=make_keyboard(question, session["session_id"]),
     )
 
 
@@ -1687,7 +1674,6 @@ async def start_quiz_from_text(message: Message, text: str, user_id: int) -> Non
         "answers": [],
         "selected": set(),
         "awaiting_text_answer": False,
-        "ui_lang": get_ui_lang_from_message(message),
     }
 
     await message.answer(ui_text(message, "Тест готов. Начинаем!", "The test is ready. Let’s begin!"))
@@ -1902,7 +1888,7 @@ async def promo_handler(message: Message) -> None:
         return
 
     ok, result_text = await apply_promo_code(user_id, parts[1])
-    await message.answer(translate_promo_result(result_text, get_ui_lang_from_message(message)))
+    await message.answer(result_text)
 
     if ok and user_id in USER_PENDING_FILES:
         await unlock_after_patreon_or_promo(message, user_id)
@@ -2087,20 +2073,27 @@ async def switch_language_callback(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id
     current_lang = get_chat_lang(chat_id)
     new_lang = "ru" if current_lang == "en" else "en"
+
     set_chat_lang(chat_id, new_lang)
 
-    await callback.answer()
-
     if new_lang == "ru":
-        await callback.message.answer(
-            "Язык переключён на русский.",
-            reply_markup=language_keyboard(chat_id),
+        text = (
+            "Язык этого чата переключён на русский.\n\n"
+            "Теперь системные сообщения бота будут на русском. "
+            "Вопросы по уроку всё равно будут создаваться на языке исходного материала."
         )
     else:
-        await callback.message.answer(
-            "Language switched to English.",
-            reply_markup=language_keyboard(chat_id),
+        text = (
+            "This chat language has been switched to English.\n\n"
+            "System messages will now be in English. "
+            "Lesson questions will still be created in the language of the source material."
         )
+
+    await callback.answer()
+    await callback.message.answer(
+        text,
+        reply_markup=language_keyboard(chat_id),
+    )
 
 
 @router.callback_query(F.data.startswith("restart_quiz:"))
