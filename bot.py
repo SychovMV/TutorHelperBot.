@@ -55,8 +55,8 @@ PATREON_TOKEN_URL = "https://www.patreon.com/api/oauth2/token"
 PATREON_IDENTITY_URL = "https://www.patreon.com/api/oauth2/v2/identity"
 
 if not BOT_TOKEN:
-raise RuntimeError("BOT_TOKEN не найден")
-
+    raise RuntimeError("BOT_TOKEN не найден")
+    
 if not OPENAI_API_KEY:
 raise RuntimeError("OPENAI_API_KEY не найден")
 
